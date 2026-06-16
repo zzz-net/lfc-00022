@@ -1,6 +1,6 @@
 # 本地巡检记录整理 CLI 工具
 
-可复用的本地巡检记录整理工具，支持 CSV/JSON 导入、数据校验、事件归并、状态标注、撤销操作和结果导出。所有数据持久化存储在 SQLite 中。
+可复用的本地巡检记录整理工具，支持 CSV/JSON 导入、数据校验、事件归并、状态标注、批量操作、可复用模板、撤销操作和结果导出。所有数据持久化存储在 SQLite 中。
 
 ## 目录结构
 
@@ -211,6 +211,9 @@ python -m inspection_cli.cli -c samples/config.yaml undo <事件ID>
 
 ## 持久化与一致性
 
-- 所有来源记录、事件、标注历史均保存在 SQLite 数据库（默认 `inspection.db`）。
+- 所有来源记录、事件、标注历史、批量操作日志、**批量任务模板**均保存在 SQLite 数据库（默认 `inspection.db`）。
 - 重新运行 CLI 后再次导出，事件状态、处理人、备注、来源记录 ID 和字段顺序均保持一致。
+- **模板跨重启持久化**：`template-save` 保存的模板在重启 CLI 后通过 `template-list` / `template-show` 仍可查看和使用。
 - 使用 `merge` 命令重新归并时，默认保留已有事件的标注状态（使用 `--no-preserve` 可清除）。
+- **模板冲突不静默降级**：若模板中的状态 / 时间格式 / 冲突策略与当前配置不兼容，`batch-annotate --use-template` 执行前明确报错退出，不会偷偷套用默认值。
+- **批量结果一致性**：模板执行的成功数、冲突数在 `batch-detail`、`batch-logs`、导出的 CSV / JSON 三者之间完全对应，version 字段保持单调递增。
