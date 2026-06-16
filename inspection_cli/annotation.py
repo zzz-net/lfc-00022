@@ -92,6 +92,7 @@ class AnnotationManager:
         event.status = status
         event.handler = handler.strip()
         event.note = note.strip()
+        event.version += 1
         self.db.update_event(event)
 
         self.db.add_annotation(
@@ -142,6 +143,7 @@ class AnnotationManager:
         else:
             event.handler = ""
             event.note = ""
+        event.version += 1
         self.db.update_event(event)
 
         self.db.delete_annotation(last_ann.id)

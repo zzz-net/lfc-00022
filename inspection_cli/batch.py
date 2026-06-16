@@ -367,6 +367,7 @@ class BatchOperationManager:
 
         expected_version = current_ev.version
         if conflict_strategy == CONFLICT_STRATEGY_FORCE:
+            update_ev.version += 1
             self.db.update_event(update_ev)
             new_version = update_ev.version
         else:
@@ -374,7 +375,7 @@ class BatchOperationManager:
             if not success:
                 current_ev2 = self.db.get_event(ev.id)
                 actual_version = current_ev2.version if current_ev2 else -1
-                return BatchOperationItem(
+                return _save_and_return(BatchOperationItem(
                     id=item_id, batch_id=batch_id, event_id=ev.id,
                     old_version=expected_version, new_version=actual_version,
                     old_status=old_status, new_status=old_status,
@@ -383,7 +384,7 @@ class BatchOperationManager:
                     status=ITEM_STATUS_CONFLICT,
                     reason=f"版本冲突：预期版本={expected_version}，更新时检测到版本={actual_version}",
                     processed_at=now,
-                )
+                ))
             new_version = update_ev.version
 
         if batch_update.status and old_status != new_status:
@@ -396,7 +397,7 @@ class BatchOperationManager:
                     note=new_note,
                 )
             except Exception as e:
-                return BatchOperationItem(
+                return _save_and_return(BatchOperationItem(
                     id=item_id, batch_id=batch_id, event_id=ev.id,
                     old_version=expected_version, new_version=new_version,
                     old_status=old_status, new_status=new_status,
@@ -405,7 +406,7 @@ class BatchOperationManager:
                     status=ITEM_STATUS_ERROR,
                     reason=f"记录标注历史失败: {e}",
                     processed_at=now,
-                )
+                ))
 
         self.db.add_batch_operation_item(BatchOperationItem(
             id=item_id, batch_id=batch_id, event_id=ev.id,

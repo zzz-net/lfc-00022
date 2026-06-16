@@ -15,8 +15,8 @@ from inspection_cli.batch import (
 )
 from inspection_cli.config import AppConfig
 from inspection_cli.database import (
-    BATCH_STATUS_COMPLETED, ITEM_STATUS_CONFLICT, ITEM_STATUS_SKIPPED,
-    ITEM_STATUS_SUCCESS, Database, Event,
+    BATCH_STATUS_COMPLETED, BATCH_STATUS_PARTIAL, ITEM_STATUS_CONFLICT,
+    ITEM_STATUS_SKIPPED, ITEM_STATUS_SUCCESS, Database, Event,
 )
 from inspection_cli.exporter import Exporter
 from inspection_cli.importer import RecordImporter
@@ -695,6 +695,290 @@ class TestBatchLogManagement(_TestBase):
     def test_empty_logs(self):
         logs = self.batch_manager.get_batch_logs()
         self.assertIn("暂无批量操作记录", logs)
+
+
+class TestVersionRegression_PreviewAnnotateThenBatch(_TestBase):
+    """回归测试：preview -> 单条 annotate -> batch 必须拦截冲突"""
+
+    def test_single_annotate_increments_version(self):
+        """单条 annotate 后 version 必须递增"""
+        eid = self._insert_event("EVT-REG-001", version=1)
+        v_before = self.db.get_event(eid).version
+        self.assertEqual(v_before, 1)
+
+        self.manager.annotate(eid, "confirmed", "UserA", "单条标注")
+        v_after = self.db.get_event(eid).version
+        self.assertEqual(v_after, 2, "单条 annotate 后 version 必须从 1 递增到 2")
+
+    def test_undo_increments_version(self):
+        """撤销标注后 version 也必须递增"""
+        eid = self._insert_event("EVT-REG-002", version=1)
+        self.manager.annotate(eid, "confirmed", "UserA", "标注")
+        self.assertEqual(self.db.get_event(eid).version, 2)
+
+        self.manager.undo(eid)
+        self.assertEqual(self.db.get_event(eid).version, 3, "undo 后 version 必须从 2 递增到 3")
+
+    def test_preview_then_single_annotate_then_batch_detects_conflict_skip(self):
+        """preview 后单条 annotate，再用 batch skip 策略必须检测到冲突"""
+        eids = self._insert_multiple_events(3, statuses=["unconfirmed"] * 3)
+        for eid in eids:
+            self.assertEqual(self.db.get_event(eid).version, 1)
+
+        bf = BatchFilter(event_ids=eids)
+        bu = BatchUpdate(status="confirmed", handler="BatchOp", note="批量标注")
+        preview_events = self.batch_manager.preview(bf)
+        self.assertEqual(len(preview_events), 3)
+        preview_versions = {ev.id: ev.version for ev in preview_events}
+        self.assertEqual(preview_versions, {eid: 1 for eid in eids})
+
+        self.manager.annotate(eids[0], "false_positive", "SingleOp", "单条抢先改")
+        self.assertEqual(self.db.get_event(eids[0]).version, 2)
+
+        result = self.batch_manager.execute(
+            bf, bu, operator="BatchRunner",
+            conflict_strategy=CONFLICT_STRATEGY_SKIP,
+            preview_events=preview_events
+        )
+        self.assertEqual(result.conflict_count, 1, f"应检测到 1 个冲突，实际 {result.conflict_count}")
+        self.assertEqual(result.success_count, 2, f"应成功 2 个，实际 {result.success_count}")
+
+        ev0 = self.db.get_event(eids[0])
+        self.assertEqual(ev0.status, "false_positive", "冲突事件状态不应被 batch 覆盖")
+        self.assertEqual(ev0.handler, "SingleOp", "冲突事件处理人不应被 batch 覆盖")
+        self.assertEqual(ev0.note, "单条抢先改", "冲突事件备注不应被 batch 覆盖")
+        self.assertEqual(ev0.version, 2, "冲突事件 version 应保持 annotate 后的值 2")
+
+        ev1 = self.db.get_event(eids[1])
+        self.assertEqual(ev1.status, "confirmed")
+        self.assertEqual(ev1.version, 2, "成功更新的事件 version 应为 2")
+
+        items = self.db.get_batch_operation_items(result.batch_id)
+        conflict_items = [x for x in items if x.status == ITEM_STATUS_CONFLICT]
+        self.assertEqual(len(conflict_items), 1)
+        self.assertEqual(conflict_items[0].event_id, eids[0])
+        self.assertIn("版本冲突", conflict_items[0].reason)
+        self.assertIn("预览时版本=1", conflict_items[0].reason)
+        self.assertIn("当前版本=2", conflict_items[0].reason)
+
+    def test_preview_then_single_annotate_then_batch_detects_conflict_abort(self):
+        """preview 后单条 annotate，abort 策略应立即中止"""
+        eids = self._insert_multiple_events(4, statuses=["unconfirmed"] * 4)
+        bf = BatchFilter(event_ids=eids)
+        bu = BatchUpdate(status="confirmed", handler="BA", note="abort测试")
+        preview_events = self.batch_manager.preview(bf)
+
+        self.manager.annotate(eids[1], "closed", "Single", "Abort触发点")
+
+        with self.assertRaises(BatchOperationError) as ctx:
+            self.batch_manager.execute(
+                bf, bu, operator="Op",
+                conflict_strategy=CONFLICT_STRATEGY_ABORT,
+                preview_events=preview_events
+            )
+        self.assertIn("版本冲突", str(ctx.exception))
+        self.assertIn("已中止批量操作", str(ctx.exception))
+
+        logs = self.db.get_recent_batch_operations(10)
+        self.assertGreaterEqual(len(logs), 1)
+        items = self.db.get_batch_operation_items(logs[0].id)
+        conflict_items = [x for x in items if x.status == ITEM_STATUS_CONFLICT]
+        self.assertGreaterEqual(len(conflict_items), 1)
+        self.assertEqual(conflict_items[0].event_id, eids[1])
+
+    def test_batch_detail_logs_match_actual_counts(self):
+        """batch-detail 中记录的成功数、冲突数、原因必须与实际执行一致"""
+        eids = self._insert_multiple_events(5, statuses=["unconfirmed"] * 5)
+        bf = BatchFilter(event_ids=eids)
+        bu = BatchUpdate(status="confirmed", handler="BatchHdl", note="详情核对")
+        preview_events = self.batch_manager.preview(bf)
+
+        self.manager.annotate(eids[2], "false_positive", "Interloper", "冲突源1")
+        self.manager.annotate(eids[4], "closed", "Interloper", "冲突源2")
+
+        result = self.batch_manager.execute(
+            bf, bu, operator="Verifier",
+            conflict_strategy=CONFLICT_STRATEGY_SKIP,
+            preview_events=preview_events
+        )
+        self.assertEqual(result.success_count, 3)
+        self.assertEqual(result.conflict_count, 2)
+        self.assertEqual(result.skipped_count, 0)
+
+        detail = self.batch_manager.get_batch_detail(result.batch_id)
+        self.assertIn(f"总计: 5 | 成功: 3 | 跳过: 0 | 冲突: 2 | 错误: 0", detail)
+        for eid in [eids[2], eids[4]]:
+            self.assertIn(eid, detail)
+        self.assertIn("预览时版本=1，当前版本=2", detail)
+
+        bo = self.db.get_batch_operation(result.batch_id)
+        self.assertIsNotNone(bo)
+        self.assertEqual(bo.success_count, 3)
+        self.assertEqual(bo.conflict_count, 2)
+        self.assertEqual(bo.status, BATCH_STATUS_PARTIAL)
+
+
+class TestVersionRegression_ReimportMergeVersion(_TestBase):
+    """回归测试：重复导入 merge 后 version 不回退，导出 CSV/JSON 含 version 完全一致"""
+
+    def _create_sample_csv(self, path: str, rows: list[dict]) -> None:
+        with open(path, "w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
+
+    def _export_csv_rows(self) -> list[dict]:
+        path = os.path.join(self.tmp_dir, "cmp.csv")
+        self.exporter.export_events(path, fmt="csv")
+        with open(path, encoding="utf-8-sig") as f:
+            return list(csv.DictReader(f))
+
+    def _export_json_events(self) -> list[dict]:
+        path = os.path.join(self.tmp_dir, "cmp.json")
+        self.exporter.export_events(path, fmt="json")
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)["events"]
+
+    def test_preserve_version_across_reimport_and_merge(self):
+        """批量修改后重复导入、再 merge，version 不能回退，导出前后一致"""
+        sample_data = [
+            {"id": "REC100", "device_id": "DEV-X001",
+             "event_time": "2026-06-15 08:30:00",
+             "issue_type": "temperature", "severity": "warning",
+             "description": "Temp high"},
+            {"id": "REC101", "device_id": "DEV-X001",
+             "event_time": "2026-06-15 08:45:00",
+             "issue_type": "temperature", "severity": "critical",
+             "description": "Temp very high"},
+            {"id": "REC102", "device_id": "DEV-X002",
+             "event_time": "2026-06-15 09:00:00",
+             "issue_type": "pressure", "severity": "warning",
+             "description": "Pressure low"},
+            {"id": "REC103", "device_id": "DEV-X003",
+             "event_time": "2026-06-15 10:30:00",
+             "issue_type": "connectivity", "severity": "critical",
+             "description": "Link down"},
+        ]
+        csv_path = os.path.join(self.tmp_dir, "sample_regress.csv")
+        self._create_sample_csv(csv_path, sample_data)
+
+        self.importer.import_file(csv_path)
+        self.merger.merge(preserve_annotations=False)
+
+        events = self.db.get_all_events()
+        event_ids_v1 = [e.id for e in events]
+        self.assertGreaterEqual(len(event_ids_v1), 2, "应至少生成 2 个事件")
+        for e in events:
+            self.assertEqual(e.version, 1, f"初始归并后 {e.id} 的 version 应为 1")
+
+        bf = BatchFilter(event_ids=event_ids_v1)
+        bu = BatchUpdate(status="confirmed", handler="Round1", note="第一轮批量")
+        r1 = self.batch_manager.execute(bf, bu, operator="Op1")
+        self.assertEqual(r1.success_count, len(event_ids_v1))
+        for eid in event_ids_v1:
+            self.assertEqual(self.db.get_event(eid).version, 2,
+                             f"批量修改后 {eid} 的 version 应为 2")
+
+        target_eid = event_ids_v1[0]
+        self.manager.annotate(target_eid, "closed", "Single", "单条再改一次")
+        self.assertEqual(self.db.get_event(target_eid).version, 3)
+
+        csv_before = self._export_csv_rows()
+        json_before = self._export_json_events()
+        before_csv_by_id = {r["event_id"]: r for r in csv_before}
+        before_json_by_id = {r["event_id"]: r for r in json_before}
+
+        self.importer.import_file(csv_path)
+        self.merger.merge(preserve_annotations=True)
+
+        events_after = self.db.get_all_events()
+        self.assertEqual(len(events_after), len(event_ids_v1),
+                         "重复导入归并后事件数量应不变")
+        for e in events_after:
+            if e.id == target_eid:
+                self.assertEqual(e.version, 3,
+                    f"重复导入归并后 {e.id} version 必须保持 3，实际 {e.version}")
+            else:
+                self.assertEqual(e.version, 2,
+                    f"重复导入归并后 {e.id} version 必须保持 2，实际 {e.version}")
+            self.assertEqual(e.status, "confirmed" if e.id != target_eid else "closed")
+            self.assertEqual(e.handler, "Round1" if e.id != target_eid else "Single")
+
+        csv_after = self._export_csv_rows()
+        json_after = self._export_json_events()
+        after_csv_by_id = {r["event_id"]: r for r in csv_after}
+        after_json_by_id = {r["event_id"]: r for r in json_after}
+
+        self.assertEqual(set(before_csv_by_id.keys()), set(after_csv_by_id.keys()))
+        for eid in before_csv_by_id:
+            self.assertEqual(before_csv_by_id[eid]["event_id"], after_csv_by_id[eid]["event_id"])
+            self.assertEqual(before_csv_by_id[eid]["status"], after_csv_by_id[eid]["status"])
+            self.assertEqual(before_csv_by_id[eid]["device_id"], after_csv_by_id[eid]["device_id"])
+            self.assertEqual(before_csv_by_id[eid]["handler"], after_csv_by_id[eid]["handler"])
+            self.assertEqual(before_csv_by_id[eid]["note"], after_csv_by_id[eid]["note"])
+            self.assertEqual(before_csv_by_id[eid]["version"], after_csv_by_id[eid]["version"],
+                f"CSV 导出 version 前后不一致：{eid} before={before_csv_by_id[eid]['version']} "
+                f"after={after_csv_by_id[eid]['version']}")
+
+        self.assertEqual(set(before_json_by_id.keys()), set(after_json_by_id.keys()))
+        for eid in before_json_by_id:
+            self.assertEqual(before_json_by_id[eid]["event_id"],
+                             after_json_by_id[eid]["event_id"])
+            self.assertEqual(before_json_by_id[eid]["status"],
+                             after_json_by_id[eid]["status"])
+            self.assertEqual(before_json_by_id[eid]["device_id"],
+                             after_json_by_id[eid]["device_id"])
+            self.assertEqual(before_json_by_id[eid]["handler"],
+                             after_json_by_id[eid]["handler"])
+            self.assertEqual(before_json_by_id[eid]["note"],
+                             after_json_by_id[eid]["note"])
+            self.assertEqual(before_json_by_id[eid]["version"],
+                             after_json_by_id[eid]["version"],
+                f"JSON 导出 version 前后不一致：{eid} before={before_json_by_id[eid]['version']} "
+                f"after={after_json_by_id[eid]['version']}")
+
+    def test_multiple_reimport_merge_version_monotonic(self):
+        """多次重复导入 merge，version 始终保持单调不递减"""
+        sample_data = [
+            {"id": "REC200", "device_id": "DEV-Y001",
+             "event_time": "2026-06-15 08:30:00",
+             "issue_type": "temperature", "severity": "warning",
+             "description": "T1"},
+            {"id": "REC201", "device_id": "DEV-Y001",
+             "event_time": "2026-06-15 08:45:00",
+             "issue_type": "temperature", "severity": "critical",
+             "description": "T2"},
+        ]
+        csv_path = os.path.join(self.tmp_dir, "sample_mono.csv")
+        self._create_sample_csv(csv_path, sample_data)
+
+        self.importer.import_file(csv_path)
+        self.merger.merge(preserve_annotations=False)
+
+        events = self.db.get_all_events()
+        self.assertGreaterEqual(len(events), 1)
+        eid = events[0].id
+
+        self.batch_manager.execute(
+            BatchFilter(event_ids=[eid]),
+            BatchUpdate(status="confirmed", handler="H1", note="N1"),
+            operator="O1"
+        )
+        v_round1 = self.db.get_event(eid).version
+        self.assertEqual(v_round1, 2)
+
+        for round_idx in range(2, 5):
+            self.importer.import_file(csv_path)
+            self.merger.merge(preserve_annotations=True)
+            v_after_merge = self.db.get_event(eid).version
+            self.assertEqual(v_after_merge, v_round1,
+                f"第 {round_idx} 轮 merge 后 version 不应回退或变动，应为 {v_round1}，实际 {v_after_merge}")
+
+            self.manager.annotate(eid, "closed" if round_idx % 2 == 0 else "confirmed",
+                                   f"H{round_idx}", f"N{round_idx}")
+            v_round1 = self.db.get_event(eid).version
+            self.assertEqual(v_round1, round_idx + 1,
+                f"annotate 后 version 应递增到 {round_idx + 1}，实际 {v_round1}")
 
 
 if __name__ == "__main__":

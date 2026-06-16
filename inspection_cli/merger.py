@@ -136,6 +136,7 @@ class EventMerger:
                     event.status = old.status
                     event.handler = old.handler
                     event.note = old.note
+                    event.version = old.version
                     result.preserved_annotations += 1
 
                 self.db.insert_event(event)

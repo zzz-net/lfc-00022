@@ -36,6 +36,7 @@ export:
     - record_count
     - handler
     - note
+    - version
     - source_record_ids
 
 batch:
