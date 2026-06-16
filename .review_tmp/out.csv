@@ -1,0 +1,7 @@
+﻿event_id,status,device_id,first_seen,last_seen,severity,issue_type,record_count,handler,note,version,source_record_ids
+EVT-0DB6F3DCE407,closed,DEV-A001,2026-06-15 08:30:00,2026-06-15 09:10:00,critical,temperature,3,TemplateUser,templated close,2,"10f7b2696c45ec5b,c2f7584e5f517b98,f40347df3041ed9e"
+EVT-06AB6785F1C9,closed,DEV-B002,2026-06-15 10:00:00,2026-06-15 10:20:00,critical,connectivity,3,TemplateUser,templated close,2,"2aacdffd1fcbcd3e,538a300eb86f1baf,df57b4d6297ca274"
+EVT-DA478FDE7893,closed,DEV-C003,2026-06-15 11:00:00,2026-06-15 11:00:00,warning,pressure,1,TemplateUser,templated close,2,72b5cf53de1346e0
+EVT-97FC5A518723,closed,DEV-C003,2026-06-15 14:00:00,2026-06-15 14:00:00,info,pressure,1,TemplateUser,templated close,2,a67b0010d1de2022
+EVT-F7B6864B1304,closed,DEV-D004,2026-06-15 15:30:00,2026-06-15 15:30:00,warning,vibration,1,TemplateUser,templated close,2,0b3dbe1e9b75b301
+EVT-FB69268D7558,closed,DEV-D004,2026-06-15 16:45:00,2026-06-15 16:45:00,critical,vibration,1,TemplateUser,templated close,2,54cc8f432c9abbe0

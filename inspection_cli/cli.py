@@ -17,6 +17,7 @@ from .database import (
 from .exporter import Exporter
 from .importer import RecordImporter
 from .merger import EventMerger
+from .templates import TemplateError, TemplateManager
 
 
 class CliContext:
@@ -36,6 +37,7 @@ class CliContext:
         self.annotation_manager = AnnotationManager(self.db)
         self.batch_manager = BatchOperationManager(self.db, self.config)
         self.exporter = Exporter(self.db, self.config)
+        self.template_manager = TemplateManager(self.db, self.config)
 
 
 pass_ctx = click.make_pass_decorator(CliContext)
@@ -358,6 +360,266 @@ def cmd_batch_cleanup(ctx: CliContext, days: int | None, yes: bool) -> None:
 
     deleted = ctx.batch_manager.cleanup_old_logs(days)
     click.echo(f"已清理 {deleted} 条批量操作日志。")
+
+
+@main.command("template-save", help="将当前批量标注参数保存为命名模板")
+@click.option("-n", "--name", required=True, help="模板名称（唯一标识）")
+@click.option("-d", "--description", default="", help="模板描述")
+@click.option("--event-ids", callback=_parse_csv_list, default=None,
+              help="按事件ID筛选，多个ID用逗号分隔")
+@click.option("--device-ids", callback=_parse_csv_list, default=None,
+              help="按设备编号筛选，多个编号用逗号分隔")
+@click.option("--statuses", callback=_parse_csv_list, default=None,
+              help="按当前状态筛选，多个状态用逗号分隔")
+@click.option("--time-from", default=None,
+              help="按时间窗口筛选：事件最后出现时间 >= 此值")
+@click.option("--time-to", default=None,
+              help="按时间窗口筛选：事件首次出现时间 <= 此值")
+@click.option("--set-status", "new_status",
+              type=click.Choice(list(VALID_STATUSES), case_sensitive=False),
+              default=None, help="批量修改的目标状态")
+@click.option("--set-handler", default=None, help="批量修改的处理人")
+@click.option("--set-note", default=None, help="批量修改的备注")
+@click.option("--conflict-strategy",
+              type=click.Choice([CONFLICT_STRATEGY_SKIP, CONFLICT_STRATEGY_ABORT, CONFLICT_STRATEGY_FORCE],
+                                case_sensitive=False),
+              default=None, help="版本冲突处理策略（skip/abort/force）")
+@click.option("--overwrite", is_flag=True, default=False,
+              help="覆盖同名模板")
+@pass_ctx
+def cmd_template_save(ctx: CliContext, name: str, description: str,
+                      event_ids, device_ids, statuses,
+                      time_from, time_to, new_status, set_handler, set_note,
+                      conflict_strategy, overwrite: bool) -> None:
+    """保存批量任务模板"""
+    batch_filter = BatchFilter(
+        event_ids=event_ids,
+        device_ids=device_ids,
+        statuses=statuses,
+        time_from=time_from,
+        time_to=time_to,
+    )
+
+    batch_update = BatchUpdate(
+        status=new_status.lower() if new_status else None,
+        handler=set_handler,
+        note=set_note,
+    )
+
+    if conflict_strategy:
+        conflict_strategy = conflict_strategy.lower()
+
+    try:
+        template = ctx.template_manager.save_template(
+            name=name,
+            description=description,
+            batch_filter=batch_filter,
+            batch_update=batch_update,
+            conflict_strategy=conflict_strategy,
+            overwrite=overwrite,
+        )
+        click.echo(f"模板 '{template.name}' 保存成功！")
+        click.echo()
+        click.echo(ctx.template_manager.format_template_detail(template))
+    except TemplateError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("template-list", help="列出所有已保存的批量任务模板")
+@pass_ctx
+def cmd_template_list(ctx: CliContext) -> None:
+    """列出模板列表"""
+    templates = ctx.template_manager.list_templates()
+    click.echo(ctx.template_manager.format_template_list(templates))
+
+
+@main.command("template-show", help="查看指定模板的详细内容和兼容性检查")
+@click.argument("name")
+@pass_ctx
+def cmd_template_show(ctx: CliContext, name: str) -> None:
+    """查看模板详情"""
+    try:
+        template = ctx.template_manager.get_template_or_error(name)
+        click.echo(ctx.template_manager.format_template_detail(template))
+        click.echo()
+        validation = ctx.template_manager.validate_template(template)
+        click.echo("兼容性检查:")
+        click.echo(validation.formatted())
+    except TemplateError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("template-copy", help="复制现有模板为新名称")
+@click.argument("source_name")
+@click.argument("target_name")
+@click.option("-d", "--description", default=None, help="新模板描述（默认：源描述 + 副本）")
+@pass_ctx
+def cmd_template_copy(ctx: CliContext, source_name: str, target_name: str,
+                      description: str | None) -> None:
+    """复制模板"""
+    try:
+        new_tpl = ctx.template_manager.copy_template(
+            source_name=source_name,
+            target_name=target_name,
+            new_description=description,
+        )
+        click.echo(f"已复制模板: '{source_name}' → '{target_name}'")
+        click.echo()
+        click.echo(ctx.template_manager.format_template_detail(new_tpl))
+    except TemplateError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("template-delete", help="删除指定的批量任务模板")
+@click.argument("name")
+@click.option("--yes", "-y", is_flag=True, default=False,
+              help="跳过确认直接删除")
+@pass_ctx
+def cmd_template_delete(ctx: CliContext, name: str, yes: bool) -> None:
+    """删除模板"""
+    try:
+        template = ctx.template_manager.get_template(name)
+        if template is None:
+            click.echo(f"模板不存在: '{name}'")
+            sys.exit(1)
+
+        if not yes:
+            click.echo(f"将删除模板 '{name}'。")
+            if not click.confirm("确认删除？此操作不可恢复！", default=False):
+                click.echo("已取消。")
+                return
+
+        deleted = ctx.template_manager.delete_template(name)
+        if deleted:
+            click.echo(f"模板 '{name}' 已删除。")
+        else:
+            click.echo(f"模板 '{name}' 删除失败。")
+            sys.exit(1)
+    except TemplateError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("batch-annotate", help="批量标注事件状态（支持筛选、模板、预览、版本冲突检测）")
+@click.option("--event-ids", callback=_parse_csv_list, default=None,
+              help="按事件ID筛选，多个ID用逗号分隔")
+@click.option("--device-ids", callback=_parse_csv_list, default=None,
+              help="按设备编号筛选，多个编号用逗号分隔")
+@click.option("--statuses", callback=_parse_csv_list, default=None,
+              help="按当前状态筛选，多个状态用逗号分隔（unconfirmed/confirmed/false_positive/closed）")
+@click.option("--time-from", default=None,
+              help="按时间窗口筛选：事件最后出现时间 >= 此值（格式：YYYY-MM-DD HH:MM:SS）")
+@click.option("--time-to", default=None,
+              help="按时间窗口筛选：事件首次出现时间 <= 此值（格式：YYYY-MM-DD HH:MM:SS）")
+@click.option("--set-status", "new_status",
+              type=click.Choice(list(VALID_STATUSES), case_sensitive=False),
+              default=None, help="批量修改的目标状态")
+@click.option("--set-handler", default=None, help="批量修改的处理人")
+@click.option("--set-note", default=None, help="批量修改的备注")
+@click.option("--use-template", "template_name", default=None,
+              help="使用已保存的模板（命令行参数可覆盖模板中的设置）")
+@click.option("-H", "--handler", required=False, default=None, help="执行批量操作的操作人（使用模板时可省略）")
+@click.option("--conflict-strategy",
+              type=click.Choice([CONFLICT_STRATEGY_SKIP, CONFLICT_STRATEGY_ABORT, CONFLICT_STRATEGY_FORCE],
+                                case_sensitive=False),
+              default=None, help="版本冲突处理策略（skip/abort/force），默认使用配置文件中的设置")
+@click.option("--yes", "-y", is_flag=True, default=False,
+              help="跳过确认直接执行")
+@pass_ctx
+def cmd_batch_annotate(ctx: CliContext, event_ids, device_ids, statuses,
+                       time_from, time_to, new_status, set_handler, set_note,
+                       template_name, handler, conflict_strategy, yes) -> None:
+    """批量标注事件（支持模板）"""
+    batch_filter = BatchFilter()
+    batch_update = BatchUpdate()
+    template_conflict_strategy = None
+    template = None
+
+    if template_name:
+        try:
+            template = ctx.template_manager.get_template_or_error(template_name)
+            validation = ctx.template_manager.validate_template(template)
+            if not validation.is_valid:
+                click.echo(f"模板 '{template_name}' 与当前配置存在冲突，无法执行：", err=True)
+                click.echo(validation.formatted(), err=True)
+                click.echo("", err=True)
+                click.echo("提示: 请修复冲突后使用 --overwrite 重新保存模板，或使用命令行参数覆盖。", err=True)
+                sys.exit(1)
+
+            bf, bu, cs = ctx.template_manager.template_to_objects(template)
+            batch_filter = bf
+            batch_update = bu
+            template_conflict_strategy = cs
+        except TemplateError as e:
+            click.echo(f"错误: {e}", err=True)
+            sys.exit(1)
+
+    if event_ids is not None:
+        batch_filter.event_ids = event_ids
+    if device_ids is not None:
+        batch_filter.device_ids = device_ids
+    if statuses is not None:
+        batch_filter.statuses = statuses
+    if time_from is not None:
+        batch_filter.time_from = time_from
+    if time_to is not None:
+        batch_filter.time_to = time_to
+
+    if new_status:
+        batch_update.status = new_status.lower()
+    if set_handler is not None:
+        batch_update.handler = set_handler
+    if set_note is not None:
+        batch_update.note = set_note
+
+    final_conflict_strategy = None
+    if conflict_strategy:
+        final_conflict_strategy = conflict_strategy.lower()
+    elif template_conflict_strategy:
+        final_conflict_strategy = template_conflict_strategy
+
+    if handler is None:
+        click.echo("错误: 必须指定操作人（-H/--handler）", err=True)
+        sys.exit(1)
+
+    if template_name:
+        click.echo(f"使用模板: {template_name}")
+        click.echo(f"模板说明: {template.describe()}")
+        click.echo()
+
+    try:
+        preview_events = ctx.batch_manager.preview(batch_filter)
+        preview = ctx.batch_manager.format_preview(
+            preview_events, batch_filter, batch_update
+        )
+        click.echo(preview.formatted())
+        click.echo()
+
+        if not preview_events:
+            return
+
+        if not yes:
+            click.echo(f"将修改 {len(preview_events)} 个事件。")
+            click.echo("请仔细检查以上预览内容。")
+            if not click.confirm("确认执行批量操作？", default=False):
+                click.echo("已取消批量操作。")
+                return
+
+        result = ctx.batch_manager.execute(
+            batch_filter=batch_filter,
+            batch_update=batch_update,
+            operator=handler,
+            conflict_strategy=final_conflict_strategy,
+            preview_events=preview_events,
+        )
+        click.echo(result.formatted())
+
+    except BatchOperationError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

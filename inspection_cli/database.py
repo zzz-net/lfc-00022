@@ -136,6 +136,61 @@ class BatchOperationItem:
     processed_at: str
 
 
+@dataclass
+class BatchTemplate:
+    """批量任务模板"""
+    id: str
+    name: str
+    description: str
+    filters: str
+    updates: str
+    conflict_strategy: str
+    created_at: str
+    updated_at: str
+
+    def to_dict(self) -> dict[str, Any]:
+        import json
+        return {
+            "id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "filters": json.loads(self.filters),
+            "updates": json.loads(self.updates),
+            "conflict_strategy": self.conflict_strategy,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+    def describe(self) -> str:
+        """输出模板简要描述"""
+        import json
+        filter_dict = json.loads(self.filters)
+        update_dict = json.loads(self.updates)
+        parts = []
+        if filter_dict.get("event_ids"):
+            parts.append(f"事件ID: {', '.join(filter_dict['event_ids'])}")
+        if filter_dict.get("device_ids"):
+            parts.append(f"设备: {', '.join(filter_dict['device_ids'])}")
+        if filter_dict.get("statuses"):
+            parts.append(f"状态筛选: {', '.join(filter_dict['statuses'])}")
+        if filter_dict.get("time_from"):
+            parts.append(f"起始时间: {filter_dict['time_from']}")
+        if filter_dict.get("time_to"):
+            parts.append(f"结束时间: {filter_dict['time_to']}")
+        filter_desc = "; ".join(parts) if parts else "无筛选"
+
+        update_parts = []
+        if update_dict.get("status"):
+            update_parts.append(f"状态→{update_dict['status']}")
+        if update_dict.get("handler"):
+            update_parts.append(f"处理人→{update_dict['handler']}")
+        if update_dict.get("note") is not None:
+            update_parts.append(f"备注→{update_dict['note'] or '(空)'}")
+        update_desc = "; ".join(update_parts) if update_parts else "无更新"
+
+        return f"筛选: {filter_desc} | 更新: {update_desc} | 冲突策略: {self.conflict_strategy}"
+
+
 class Database:
     """SQLite 数据库封装"""
 
@@ -271,6 +326,20 @@ class Database:
                     ON batch_operation_items(event_id);
                 CREATE INDEX IF NOT EXISTS idx_batch_items_status
                     ON batch_operation_items(status);
+
+                CREATE TABLE IF NOT EXISTS batch_templates (
+                    id TEXT PRIMARY KEY,
+                    name TEXT UNIQUE NOT NULL,
+                    description TEXT DEFAULT '',
+                    filters TEXT NOT NULL,
+                    updates TEXT NOT NULL,
+                    conflict_strategy TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_templates_name
+                    ON batch_templates(name);
             """)
 
     # ============ SourceRecord 操作 ============
@@ -609,3 +678,71 @@ class Database:
                 (cutoff,)
             )
             return cur.rowcount
+
+    # ============ BatchTemplate 操作 ============
+
+    def insert_template(self, template_id: str, name: str, description: str,
+                      filters: str, updates: str, conflict_strategy: str,
+                      created_at: str, updated_at: str) -> None:
+        """插入模板"""
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO batch_templates
+                   (id, name, description, filters, updates, conflict_strategy,
+                    created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (template_id, name, description, filters, updates,
+                 conflict_strategy, created_at, updated_at)
+            )
+
+    def update_template(self, template_id: str, description: str,
+                        filters: str, updates: str, conflict_strategy: str,
+                        updated_at: str) -> None:
+        """更新模板"""
+        with self._conn() as conn:
+            conn.execute(
+                """UPDATE batch_templates SET
+                   description=?, filters=?, updates=?,
+                   conflict_strategy=?, updated_at=?
+                   WHERE id=?""",
+                (description, filters, updates, conflict_strategy,
+                 updated_at, template_id)
+            )
+
+    def get_template(self, template_id: str) -> Optional[BatchTemplate]:
+        """按ID获取模板"""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM batch_templates WHERE id = ?",
+                (template_id,)
+            ).fetchone()
+            if not row:
+                return None
+            return BatchTemplate(**dict(row))
+
+    def get_template_by_name(self, name: str) -> Optional[BatchTemplate]:
+        """按名称获取模板"""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM batch_templates WHERE name = ?",
+                (name,)
+            ).fetchone()
+            if not row:
+                return None
+            return BatchTemplate(**dict(row))
+
+    def get_all_templates(self) -> list[BatchTemplate]:
+        """获取所有模板，按创建时间倒序"""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM batch_templates ORDER BY created_at DESC"
+            ).fetchall()
+            return [BatchTemplate(**dict(r)) for r in rows]
+
+    def delete_template(self, template_id: str) -> None:
+        """删除模板"""
+        with self._conn() as conn:
+            conn.execute(
+                "DELETE FROM batch_templates WHERE id = ?",
+                (template_id,)
+            )
