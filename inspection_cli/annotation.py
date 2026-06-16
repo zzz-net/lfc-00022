@@ -127,18 +127,19 @@ class AnnotationManager:
                 f"尚未进行过任何标注操作。"
             )
 
-        last_ann = self.db.get_last_annotation(event_id)
-        if last_ann is None:
-            raise AnnotationError(
-                f"事件 {event_id} 没有可撤销的标注记录（内部错误）"
-            )
+        annotations = self.db.get_annotations_for_event(event_id)
+        last_ann = annotations[-1]
 
         restored = last_ann.old_status
         if restored not in VALID_STATUSES:
             restored = "unconfirmed"
 
         event.status = restored
-        if restored == "unconfirmed":
+        if len(annotations) >= 2:
+            prev_ann = annotations[-2]
+            event.handler = prev_ann.handler
+            event.note = prev_ann.note
+        else:
             event.handler = ""
             event.note = ""
         self.db.update_event(event)

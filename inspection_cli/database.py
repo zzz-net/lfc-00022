@@ -296,7 +296,7 @@ class Database:
             row = conn.execute(
                 """SELECT * FROM annotations
                    WHERE event_id = ?
-                   ORDER BY annotate_time DESC, id DESC LIMIT 1""",
+                   ORDER BY rowid DESC LIMIT 1""",
                 (event_id,)
             ).fetchone()
             if not row:
@@ -308,6 +308,16 @@ class Database:
             conn.execute(
                 "DELETE FROM annotations WHERE id = ?", (annotation_id,)
             )
+
+    def get_annotations_for_event(self, event_id: str) -> list[Annotation]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM annotations
+                   WHERE event_id = ?
+                   ORDER BY rowid ASC""",
+                (event_id,)
+            ).fetchall()
+            return [Annotation(**dict(r)) for r in rows]
 
     def get_annotation_count(self, event_id: str) -> int:
         with self._conn() as conn:
