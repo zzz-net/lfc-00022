@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "inspection-cli"
+version = "0.1.0"
+description = "本地巡检记录整理 CLI 工具"
+requires-python = ">=3.9"
+dependencies = [
+    "click>=8.1.0",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+inspection-cli = "inspection_cli.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["inspection_cli*"]

@@ -1,0 +1,5 @@
+validation:
+  device_id_pattern: "^DEV-[A-Z0-9]{3,10}$"
+  time_formats: "not_a_list"
+  valid_issue_types:
+    - temperature

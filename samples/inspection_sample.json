@@ -1,0 +1,51 @@
+[
+  {
+    "device_id": "DEV-A001",
+    "event_time": "2026-06-16T08:00:00",
+    "issue_type": "temperature",
+    "severity": "warning",
+    "description": "A01设备早间温度巡检"
+  },
+  {
+    "device_id": "DEV-A001",
+    "event_time": "2026-06-16T08:20:00",
+    "issue_type": "temperature",
+    "severity": "critical",
+    "description": "A01设备温度告警"
+  },
+  {
+    "device_id": "DEV-E005",
+    "event_time": "2026/06/16 09:15:00",
+    "issue_type": "voltage",
+    "severity": "warning",
+    "description": "电压波动"
+  },
+  {
+    "device_id": "DEV-E005",
+    "event_time": "2026/06/16 09:30:00",
+    "issue_type": "voltage",
+    "severity": "critical",
+    "description": "电压异常下降"
+  },
+  {
+    "device_id": "DEV-E005",
+    "event_time": "2026/06/16 09:55:00",
+    "issue_type": "current",
+    "severity": "warning",
+    "description": "电流异常升高"
+  },
+  {
+    "device_id": "DEV-F006",
+    "event_time": "2026-06-16T12:00:00",
+    "issue_type": "security",
+    "severity": "warning",
+    "description": "异常登录尝试"
+  },
+  {
+    "device_id": "DEV-F006",
+    "event_time": "2026-06-16T13:30:00",
+    "issue_type": "performance",
+    "severity": "info",
+    "description": "CPU负载过高"
+  }
+]

@@ -1,0 +1,11 @@
+device_id,event_time,issue_type,severity,description
+DEV-A001,2026-06-15 08:30:00,temperature,warning,机房A01温度偏高
+DEV-A001,2026-06-15 08:45:00,temperature,critical,机房A01温度超过阈值
+DEV-A001,2026-06-15 09:10:00,temperature,critical,机房A01温度持续过高
+DEV-B002,2026-06-15 10:00:00,connectivity,info,网络抖动恢复
+DEV-B002,2026-06-15 10:05:00,connectivity,warning,网络丢包率上升
+DEV-B002,2026-06-15 10:20:00,connectivity,critical,网络中断
+DEV-C003,2026-06-15 11:00:00,pressure,warning,液压压力波动
+DEV-C003,2026-06-15 14:00:00,pressure,info,压力恢复正常
+DEV-D004,2026-06-15 15:30:00,vibration,warning,异常振动检测
+DEV-D004,2026-06-15 16:45:00,vibration,critical,振动超标报警

@@ -1,0 +1,6 @@
+device_id,event_time,issue_type,severity,description
+DEV-A001,2026-06-15 08:30:00,temperature,warning,正常记录
+BAD-ID,2026-06-15 08:45:00,temperature,critical,设备编号格式错误
+DEV-A001,not-a-time,temperature,critical,时间格式错误
+DEV-C003,2026-06-15 11:00:00,unknown_type,warning,问题类型无效
+DEV-D004,2026-06-15 15:30:00,vibration,fatal,严重级别无效
