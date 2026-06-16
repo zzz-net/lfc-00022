@@ -1,0 +1,12 @@
+﻿event_id,status,device_id,first_seen,last_seen,severity,issue_type,record_count,handler,note,source_record_ids
+EVT-0DB6F3DCE407,confirmed,DEV-A001,2026-06-15 08:30:00,2026-06-15 09:10:00,critical,temperature,3,demo-user,演示标注 - 已确认,"10f7b2696c45ec5b,c2f7584e5f517b98,f40347df3041ed9e"
+EVT-06AB6785F1C9,unconfirmed,DEV-B002,2026-06-15 10:00:00,2026-06-15 10:20:00,critical,connectivity,3,,,"2aacdffd1fcbcd3e,538a300eb86f1baf,df57b4d6297ca274"
+EVT-DA478FDE7893,unconfirmed,DEV-C003,2026-06-15 11:00:00,2026-06-15 11:00:00,warning,pressure,1,,,72b5cf53de1346e0
+EVT-97FC5A518723,unconfirmed,DEV-C003,2026-06-15 14:00:00,2026-06-15 14:00:00,info,pressure,1,,,a67b0010d1de2022
+EVT-F7B6864B1304,unconfirmed,DEV-D004,2026-06-15 15:30:00,2026-06-15 15:30:00,warning,vibration,1,,,0b3dbe1e9b75b301
+EVT-FB69268D7558,unconfirmed,DEV-D004,2026-06-15 16:45:00,2026-06-15 16:45:00,critical,vibration,1,,,54cc8f432c9abbe0
+EVT-554BEFEFF6AF,unconfirmed,DEV-A001,2026-06-16 08:00:00,2026-06-16 08:20:00,critical,temperature,2,,,"345a899612c6638d,73c83b877f081d84"
+EVT-0449F1300864,unconfirmed,DEV-E005,2026-06-16 09:15:00,2026-06-16 09:30:00,critical,voltage,2,,,"7395403fd3ae933e,8c231f712d3a9c65"
+EVT-452A77E8ED81,unconfirmed,DEV-E005,2026-06-16 09:55:00,2026-06-16 09:55:00,warning,current,1,,,3a11e7ea98d5d96f
+EVT-DEF0575B1AD6,unconfirmed,DEV-F006,2026-06-16 12:00:00,2026-06-16 12:00:00,warning,security,1,,,e03f684eecbc1ef9
+EVT-7DE3007BDF6D,unconfirmed,DEV-F006,2026-06-16 13:30:00,2026-06-16 13:30:00,info,performance,1,,,dbe5a2eb35a18461

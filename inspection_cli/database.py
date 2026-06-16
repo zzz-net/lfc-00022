@@ -11,6 +11,20 @@ from typing import Any, Iterator, Optional
 
 VALID_STATUSES = {"unconfirmed", "confirmed", "false_positive", "closed"}
 
+BATCH_STATUS_PENDING = "pending"
+BATCH_STATUS_COMPLETED = "completed"
+BATCH_STATUS_PARTIAL = "partial"
+
+ITEM_STATUS_SUCCESS = "success"
+ITEM_STATUS_SKIPPED = "skipped"
+ITEM_STATUS_CONFLICT = "conflict"
+ITEM_STATUS_ERROR = "error"
+
+CONFLICT_STRATEGY_SKIP = "skip"
+CONFLICT_STRATEGY_ABORT = "abort"
+CONFLICT_STRATEGY_FORCE = "force"
+VALID_CONFLICT_STRATEGIES = {CONFLICT_STRATEGY_SKIP, CONFLICT_STRATEGY_ABORT, CONFLICT_STRATEGY_FORCE}
+
 
 @dataclass
 class SourceRecord:
@@ -53,6 +67,7 @@ class Event:
     note: str = ""
     record_count: int = 0
     record_ids: list[str] = field(default_factory=list)
+    version: int = 1
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -67,6 +82,7 @@ class Event:
             "handler": self.handler,
             "note": self.note,
             "source_record_ids": ",".join(self.record_ids),
+            "version": self.version,
         }
 
 
@@ -80,6 +96,44 @@ class Annotation:
     handler: str
     note: str
     annotate_time: str
+
+
+@dataclass
+class BatchOperation:
+    """批量操作记录"""
+    id: str
+    operation_type: str
+    status: str
+    operator: str
+    filters: str
+    updates: str
+    total_count: int
+    success_count: int
+    skipped_count: int
+    conflict_count: int
+    error_count: int
+    conflict_strategy: str
+    created_at: str
+    completed_at: str = ""
+
+
+@dataclass
+class BatchOperationItem:
+    """批量操作单项记录"""
+    id: str
+    batch_id: str
+    event_id: str
+    old_version: int
+    new_version: int
+    old_status: str
+    new_status: str
+    old_handler: str
+    new_handler: str
+    old_note: str
+    new_note: str
+    status: str
+    reason: str
+    processed_at: str
 
 
 class Database:
@@ -134,13 +188,18 @@ class Database:
                     status TEXT DEFAULT 'unconfirmed',
                     handler TEXT DEFAULT '',
                     note TEXT DEFAULT '',
-                    record_count INTEGER DEFAULT 0
+                    record_count INTEGER DEFAULT 0,
+                    version INTEGER DEFAULT 1
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_events_device
                     ON events(device_id);
                 CREATE INDEX IF NOT EXISTS idx_events_status
                     ON events(status);
+                CREATE INDEX IF NOT EXISTS idx_events_first_seen
+                    ON events(first_seen);
+                CREATE INDEX IF NOT EXISTS idx_events_last_seen
+                    ON events(last_seen);
 
                 CREATE TABLE IF NOT EXISTS event_records (
                     event_id TEXT NOT NULL,
@@ -165,6 +224,53 @@ class Database:
                     ON annotations(event_id);
                 CREATE INDEX IF NOT EXISTS idx_annotations_time
                     ON annotations(annotate_time);
+
+                CREATE TABLE IF NOT EXISTS batch_operations (
+                    id TEXT PRIMARY KEY,
+                    operation_type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    operator TEXT NOT NULL,
+                    filters TEXT NOT NULL,
+                    updates TEXT NOT NULL,
+                    total_count INTEGER DEFAULT 0,
+                    success_count INTEGER DEFAULT 0,
+                    skipped_count INTEGER DEFAULT 0,
+                    conflict_count INTEGER DEFAULT 0,
+                    error_count INTEGER DEFAULT 0,
+                    conflict_strategy TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    completed_at TEXT DEFAULT ''
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_batch_ops_status
+                    ON batch_operations(status);
+                CREATE INDEX IF NOT EXISTS idx_batch_ops_created
+                    ON batch_operations(created_at);
+
+                CREATE TABLE IF NOT EXISTS batch_operation_items (
+                    id TEXT PRIMARY KEY,
+                    batch_id TEXT NOT NULL,
+                    event_id TEXT NOT NULL,
+                    old_version INTEGER NOT NULL,
+                    new_version INTEGER NOT NULL,
+                    old_status TEXT NOT NULL,
+                    new_status TEXT NOT NULL,
+                    old_handler TEXT NOT NULL,
+                    new_handler TEXT NOT NULL,
+                    old_note TEXT NOT NULL,
+                    new_note TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    reason TEXT DEFAULT '',
+                    processed_at TEXT NOT NULL,
+                    FOREIGN KEY (batch_id) REFERENCES batch_operations(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_batch_items_batch
+                    ON batch_operation_items(batch_id);
+                CREATE INDEX IF NOT EXISTS idx_batch_items_event
+                    ON batch_operation_items(event_id);
+                CREATE INDEX IF NOT EXISTS idx_batch_items_status
+                    ON batch_operation_items(status);
             """)
 
     # ============ SourceRecord 操作 ============
@@ -214,11 +320,11 @@ class Database:
             conn.execute(
                 """INSERT INTO events
                    (id, device_id, first_seen, last_seen, issue_type,
-                    severity, status, handler, note, record_count)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    severity, status, handler, note, record_count, version)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (event.id, event.device_id, event.first_seen, event.last_seen,
                  event.issue_type, event.severity, event.status,
-                 event.handler, event.note, event.record_count)
+                 event.handler, event.note, event.record_count, event.version)
             )
             for rid in event.record_ids:
                 conn.execute(
@@ -231,12 +337,26 @@ class Database:
             conn.execute(
                 """UPDATE events SET
                    device_id=?, first_seen=?, last_seen=?, issue_type=?,
-                   severity=?, status=?, handler=?, note=?, record_count=?
+                   severity=?, status=?, handler=?, note=?, record_count=?, version=?
                    WHERE id=?""",
                 (event.device_id, event.first_seen, event.last_seen,
                  event.issue_type, event.severity, event.status,
-                 event.handler, event.note, event.record_count, event.id)
+                 event.handler, event.note, event.record_count,
+                 event.version, event.id)
             )
+
+    def update_event_with_version(self, event: Event, expected_version: int) -> bool:
+        """带版本检查的更新，用于乐观锁。返回 True 表示更新成功，False 表示版本冲突。"""
+        event.version = expected_version + 1
+        with self._conn() as conn:
+            cur = conn.execute(
+                """UPDATE events SET
+                   status=?, handler=?, note=?, version=?
+                   WHERE id=? AND version=?""",
+                (event.status, event.handler, event.note, event.version,
+                 event.id, expected_version)
+            )
+            return cur.rowcount > 0
 
     def get_event(self, event_id: str) -> Optional[Event]:
         with self._conn() as conn:
@@ -325,3 +445,167 @@ class Database:
                 "SELECT COUNT(*) FROM annotations WHERE event_id = ?", (event_id,)
             )
             return cur.fetchone()[0]
+
+    # ============ 事件过滤查询 ============
+
+    def filter_events(self,
+                      event_ids: Optional[list[str]] = None,
+                      device_ids: Optional[list[str]] = None,
+                      statuses: Optional[list[str]] = None,
+                      time_from: Optional[str] = None,
+                      time_to: Optional[str] = None) -> list[Event]:
+        """按条件筛选事件"""
+        conditions: list[str] = []
+        params: list[Any] = []
+
+        if event_ids:
+            placeholders = ",".join(["?"] * len(event_ids))
+            conditions.append(f"e.id IN ({placeholders})")
+            params.extend(event_ids)
+
+        if device_ids:
+            placeholders = ",".join(["?"] * len(device_ids))
+            conditions.append(f"e.device_id IN ({placeholders})")
+            params.extend(device_ids)
+
+        if statuses:
+            placeholders = ",".join(["?"] * len(statuses))
+            conditions.append(f"e.status IN ({placeholders})")
+            params.extend(statuses)
+
+        if time_from:
+            conditions.append("e.last_seen >= ?")
+            params.append(time_from)
+
+        if time_to:
+            conditions.append("e.first_seen <= ?")
+            params.append(time_to)
+
+        where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
+
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM events e {where_clause} ORDER BY e.first_seen ASC",
+                params
+            ).fetchall()
+            events = []
+            for row in rows:
+                d = dict(row)
+                rids = conn.execute(
+                    "SELECT record_id FROM event_records WHERE event_id = ? ORDER BY record_id",
+                    (d["id"],)
+                ).fetchall()
+                d["record_ids"] = [r[0] for r in rids]
+                events.append(Event(**d))
+            return events
+
+    # ============ BatchOperation 操作 ============
+
+    def create_batch_operation(self, operation_type: str, operator: str,
+                               filters: str, updates: str,
+                               total_count: int, conflict_strategy: str) -> str:
+        """创建批量操作记录"""
+        batch_id = "BATCH-" + uuid.uuid4().hex[:12].upper()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO batch_operations
+                   (id, operation_type, status, operator, filters, updates,
+                    total_count, success_count, skipped_count, conflict_count,
+                    error_count, conflict_strategy, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, ?, ?)""",
+                (batch_id, operation_type, BATCH_STATUS_PENDING, operator,
+                 filters, updates, total_count, conflict_strategy, now)
+            )
+        return batch_id
+
+    def update_batch_operation_counts(self, batch_id: str, success_count: int,
+                                      skipped_count: int, conflict_count: int,
+                                      error_count: int) -> None:
+        """更新批量操作计数"""
+        total = success_count + skipped_count + conflict_count + error_count
+        with self._conn() as conn:
+            conn.execute(
+                """UPDATE batch_operations SET
+                   success_count=?, skipped_count=?, conflict_count=?, error_count=?
+                   WHERE id=?""",
+                (success_count, skipped_count, conflict_count, error_count, batch_id)
+            )
+
+    def complete_batch_operation(self, batch_id: str) -> None:
+        """标记批量操作为完成"""
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._conn() as conn:
+            row = conn.execute(
+                """SELECT success_count, skipped_count, conflict_count, error_count, total_count
+                   FROM batch_operations WHERE id=?""",
+                (batch_id,)
+            ).fetchone()
+            if not row:
+                return
+            success, skipped, conflict, error, total = row
+            if success == total:
+                status = BATCH_STATUS_COMPLETED
+            elif success + skipped + conflict + error > 0:
+                status = BATCH_STATUS_PARTIAL
+            else:
+                status = BATCH_STATUS_COMPLETED
+            conn.execute(
+                "UPDATE batch_operations SET status=?, completed_at=? WHERE id=?",
+                (status, now, batch_id)
+            )
+
+    def add_batch_operation_item(self, item: BatchOperationItem) -> None:
+        """添加批量操作单项记录"""
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO batch_operation_items
+                   (id, batch_id, event_id, old_version, new_version,
+                    old_status, new_status, old_handler, new_handler,
+                    old_note, new_note, status, reason, processed_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (item.id, item.batch_id, item.event_id, item.old_version,
+                 item.new_version, item.old_status, item.new_status,
+                 item.old_handler, item.new_handler, item.old_note,
+                 item.new_note, item.status, item.reason, item.processed_at)
+            )
+
+    def get_batch_operation(self, batch_id: str) -> Optional[BatchOperation]:
+        """获取批量操作记录"""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM batch_operations WHERE id = ?",
+                (batch_id,)
+            ).fetchone()
+            if not row:
+                return None
+            return BatchOperation(**dict(row))
+
+    def get_batch_operation_items(self, batch_id: str) -> list[BatchOperationItem]:
+        """获取批量操作的所有单项记录"""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM batch_operation_items WHERE batch_id = ? ORDER BY processed_at",
+                (batch_id,)
+            ).fetchall()
+            return [BatchOperationItem(**dict(r)) for r in rows]
+
+    def get_recent_batch_operations(self, limit: int = 20) -> list[BatchOperation]:
+        """获取最近的批量操作记录"""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM batch_operations ORDER BY created_at DESC LIMIT ?",
+                (limit,)
+            ).fetchall()
+            return [BatchOperation(**dict(r)) for r in rows]
+
+    def cleanup_old_batch_operations(self, days: int) -> int:
+        """清理指定天数前的批量操作记录，返回删除的记录数"""
+        from datetime import timedelta
+        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        with self._conn() as conn:
+            cur = conn.execute(
+                "DELETE FROM batch_operations WHERE created_at < ?",
+                (cutoff,)
+            )
+            return cur.rowcount

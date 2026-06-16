@@ -43,10 +43,22 @@ class EventMergeConfig:
 class ExportConfig:
     """导出配置"""
     csv_field_order: list[str] = field(default_factory=lambda: [
-        "event_id", "status", "device_id", "first_seen", "last_seen",
+        "event_id", "status", "device_id", "version",
+        "first_seen", "last_seen",
         "severity", "issue_type", "record_count", "handler", "note",
         "source_record_ids"
     ])
+
+
+@dataclass
+class BatchConfig:
+    """批量操作配置"""
+    preview_fields: list[str] = field(default_factory=lambda: [
+        "event_id", "status", "device_id", "first_seen", "last_seen",
+        "severity", "issue_type", "handler", "note"
+    ])
+    conflict_strategy: str = "skip"
+    log_retention_days: int = 30
 
 
 @dataclass
@@ -55,6 +67,7 @@ class AppConfig:
     validation: ValidationRules = field(default_factory=ValidationRules)
     event_merge: EventMergeConfig = field(default_factory=EventMergeConfig)
     export: ExportConfig = field(default_factory=ExportConfig)
+    batch: BatchConfig = field(default_factory=BatchConfig)
     db_path: str = "inspection.db"
 
     @classmethod
@@ -135,6 +148,29 @@ class AppConfig:
                 if not all(isinstance(f, str) for f in ex["csv_field_order"]):
                     raise ConfigError("export.csv_field_order 列表元素必须是字符串")
                 cfg.export.csv_field_order = ex["csv_field_order"]
+
+        if "batch" in raw:
+            bt = raw["batch"]
+            if not isinstance(bt, dict):
+                raise ConfigError("batch 必须是字典")
+            if "preview_fields" in bt:
+                if not isinstance(bt["preview_fields"], list):
+                    raise ConfigError("batch.preview_fields 必须是列表")
+                if not all(isinstance(f, str) for f in bt["preview_fields"]):
+                    raise ConfigError("batch.preview_fields 列表元素必须是字符串")
+                cfg.batch.preview_fields = bt["preview_fields"]
+            if "conflict_strategy" in bt:
+                if not isinstance(bt["conflict_strategy"], str):
+                    raise ConfigError("batch.conflict_strategy 必须是字符串")
+                if bt["conflict_strategy"] not in {"skip", "abort", "force"}:
+                    raise ConfigError(
+                        "batch.conflict_strategy 必须是 skip、abort 或 force"
+                    )
+                cfg.batch.conflict_strategy = bt["conflict_strategy"]
+            if "log_retention_days" in bt:
+                if not isinstance(bt["log_retention_days"], int) or bt["log_retention_days"] <= 0:
+                    raise ConfigError("batch.log_retention_days 必须是正整数")
+                cfg.batch.log_retention_days = bt["log_retention_days"]
 
         if "db_path" in raw:
             if not isinstance(raw["db_path"], str):

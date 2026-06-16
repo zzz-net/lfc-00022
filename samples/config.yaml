@@ -38,4 +38,18 @@ export:
     - note
     - source_record_ids
 
+batch:
+  preview_fields:
+    - event_id
+    - status
+    - device_id
+    - first_seen
+    - last_seen
+    - severity
+    - issue_type
+    - handler
+    - note
+  conflict_strategy: "skip"
+  log_retention_days: 30
+
 db_path: "inspection.db"

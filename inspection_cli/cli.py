@@ -8,8 +8,12 @@ import click
 
 from . import __version__
 from .annotation import AnnotationError, AnnotationManager
+from .batch import BatchOperationError, BatchOperationManager, BatchFilter, BatchUpdate
 from .config import AppConfig, ConfigError
-from .database import Database
+from .database import (
+    CONFLICT_STRATEGY_ABORT, CONFLICT_STRATEGY_FORCE, CONFLICT_STRATEGY_SKIP,
+    Database, VALID_STATUSES,
+)
 from .exporter import Exporter
 from .importer import RecordImporter
 from .merger import EventMerger
@@ -30,6 +34,7 @@ class CliContext:
         self.importer = RecordImporter(self.db, self.config)
         self.merger = EventMerger(self.db, self.config)
         self.annotation_manager = AnnotationManager(self.db)
+        self.batch_manager = BatchOperationManager(self.db, self.config)
         self.exporter = Exporter(self.db, self.config)
 
 
@@ -232,6 +237,127 @@ def cmd_demo(ctx: CliContext, demo_config: str | None, demo_csv: str | None,
 
     click.echo()
     click.echo("演示完成！使用 `inspection-cli list` 查看事件列表。")
+
+
+def _parse_csv_list(ctx, param, value):
+    """解析逗号分隔的列表参数"""
+    if value is None:
+        return None
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+@main.command("batch-annotate", help="批量标注事件状态（支持筛选、预览、版本冲突检测）")
+@click.option("--event-ids", callback=_parse_csv_list, default=None,
+              help="按事件ID筛选，多个ID用逗号分隔")
+@click.option("--device-ids", callback=_parse_csv_list, default=None,
+              help="按设备编号筛选，多个编号用逗号分隔")
+@click.option("--statuses", callback=_parse_csv_list, default=None,
+              help="按当前状态筛选，多个状态用逗号分隔（unconfirmed/confirmed/false_positive/closed）")
+@click.option("--time-from", default=None,
+              help="按时间窗口筛选：事件最后出现时间 >= 此值（格式：YYYY-MM-DD HH:MM:SS）")
+@click.option("--time-to", default=None,
+              help="按时间窗口筛选：事件首次出现时间 <= 此值（格式：YYYY-MM-DD HH:MM:SS）")
+@click.option("--set-status", "new_status",
+              type=click.Choice(list(VALID_STATUSES), case_sensitive=False),
+              default=None, help="批量修改的目标状态")
+@click.option("--set-handler", default=None, help="批量修改的处理人")
+@click.option("--set-note", default=None, help="批量修改的备注")
+@click.option("-H", "--handler", required=True, help="执行批量操作的操作人")
+@click.option("--conflict-strategy",
+              type=click.Choice([CONFLICT_STRATEGY_SKIP, CONFLICT_STRATEGY_ABORT, CONFLICT_STRATEGY_FORCE],
+                                case_sensitive=False),
+              default=None, help="版本冲突处理策略（skip/abort/force），默认使用配置文件中的设置")
+@click.option("--yes", "-y", is_flag=True, default=False,
+              help="跳过确认直接执行")
+@pass_ctx
+def cmd_batch_annotate(ctx: CliContext, event_ids, device_ids, statuses,
+                       time_from, time_to, new_status, set_handler, set_note,
+                       handler, conflict_strategy, yes) -> None:
+    """批量标注事件"""
+    batch_filter = BatchFilter(
+        event_ids=event_ids,
+        device_ids=device_ids,
+        statuses=statuses,
+        time_from=time_from,
+        time_to=time_to,
+    )
+
+    batch_update = BatchUpdate(
+        status=new_status.lower() if new_status else None,
+        handler=set_handler,
+        note=set_note,
+    )
+
+    if conflict_strategy:
+        conflict_strategy = conflict_strategy.lower()
+
+    try:
+        preview_events = ctx.batch_manager.preview(batch_filter)
+        preview = ctx.batch_manager.format_preview(
+            preview_events, batch_filter, batch_update
+        )
+        click.echo(preview.formatted())
+        click.echo()
+
+        if not preview_events:
+            return
+
+        if not yes:
+            click.echo(f"将修改 {len(preview_events)} 个事件。")
+            click.echo("请仔细检查以上预览内容。")
+            if not click.confirm("确认执行批量操作？", default=False):
+                click.echo("已取消批量操作。")
+                return
+
+        result = ctx.batch_manager.execute(
+            batch_filter=batch_filter,
+            batch_update=batch_update,
+            operator=handler,
+            conflict_strategy=conflict_strategy,
+            preview_events=preview_events,
+        )
+        click.echo(result.formatted())
+
+    except BatchOperationError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("batch-logs", help="查看批量操作日志")
+@click.option("-n", "--limit", type=int, default=20, help="显示最近的N条记录")
+@pass_ctx
+def cmd_batch_logs(ctx: CliContext, limit: int) -> None:
+    """查看批量操作日志"""
+    click.echo(ctx.batch_manager.get_batch_logs(limit))
+
+
+@main.command("batch-detail", help="查看批量操作详情")
+@click.argument("batch_id")
+@pass_ctx
+def cmd_batch_detail(ctx: CliContext, batch_id: str) -> None:
+    """查看批量操作详情"""
+    click.echo(ctx.batch_manager.get_batch_detail(batch_id))
+
+
+@main.command("batch-cleanup", help="清理指定天数前的批量操作日志")
+@click.option("--days", type=int, default=None,
+              help="清理多少天前的日志，默认使用配置文件中的设置")
+@click.option("--yes", "-y", is_flag=True, default=False,
+              help="跳过确认直接执行")
+@pass_ctx
+def cmd_batch_cleanup(ctx: CliContext, days: int | None, yes: bool) -> None:
+    """清理批量操作日志"""
+    if days is None:
+        days = ctx.config.batch.log_retention_days
+
+    if not yes:
+        click.echo(f"将清理 {days} 天前的批量操作日志。")
+        if not click.confirm("确认执行清理？", default=False):
+            click.echo("已取消。")
+            return
+
+    deleted = ctx.batch_manager.cleanup_old_logs(days)
+    click.echo(f"已清理 {deleted} 条批量操作日志。")
 
 
 if __name__ == "__main__":
