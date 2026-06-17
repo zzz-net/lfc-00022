@@ -19,6 +19,10 @@ from .database import (
     TEMPLATE_IMPORT_LOG_STATUS_ROLLED_BACK,
     TEMPLATE_IMPORT_LOG_STATUS_SUCCESS, VALID_CONFLICT_STRATEGIES,
     VALID_STATUSES, VALID_TEMPLATE_IMPORT_CONFLICT_STRATEGIES,
+    TemplateVersion, TEMPLATE_VERSION_OP_CREATE,
+    TEMPLATE_VERSION_OP_UPDATE, TEMPLATE_VERSION_OP_OVERWRITE,
+    TEMPLATE_VERSION_OP_IMPORT, TEMPLATE_VERSION_OP_DELETE_BACKUP,
+    TEMPLATE_VERSION_OP_ROLLBACK, VALID_TEMPLATE_VERSION_OPERATIONS,
 )
 
 
@@ -178,6 +182,117 @@ class TemplateImportResult:
         return "\n".join(lines)
 
 
+@dataclass
+class TemplateFieldDiff:
+    """两个模板版本之间的单字段差异"""
+    field: str
+    old_value: Any
+    new_value: Any
+
+    def formatted(self) -> str:
+        def _fmt(v: Any) -> str:
+            if v is None:
+                return "(未设置)"
+            if isinstance(v, list):
+                return ", ".join(str(x) for x in v) if v else "(空列表)"
+            return str(v)
+        return f"{self.field}: {_fmt(self.old_value)} → {_fmt(self.new_value)}"
+
+
+@dataclass
+class TemplateDiffResult:
+    """两个模板版本之间的完整差异"""
+    template_name: str
+    old_version: int
+    new_version: int
+    filter_diffs: list[TemplateFieldDiff] = field(default_factory=list)
+    update_diffs: list[TemplateFieldDiff] = field(default_factory=list)
+    other_diffs: list[TemplateFieldDiff] = field(default_factory=list)
+
+    @property
+    def has_changes(self) -> bool:
+        return bool(self.filter_diffs or self.update_diffs or self.other_diffs)
+
+    def formatted(self) -> str:
+        if not self.has_changes:
+            return f"模板 '{self.template_name}' 版本 {self.old_version} 与 {self.new_version} 完全一致。"
+        lines = [f"模板 '{self.template_name}' 版本差异: v{self.old_version} → v{self.new_version}"]
+        lines.append("=" * 60)
+        if self.filter_diffs:
+            lines.append("")
+            lines.append("筛选条件变更:")
+            for d in self.filter_diffs:
+                lines.append(f"  {d.formatted()}")
+        if self.update_diffs:
+            lines.append("")
+            lines.append("更新内容变更:")
+            for d in self.update_diffs:
+                lines.append(f"  {d.formatted()}")
+        if self.other_diffs:
+            lines.append("")
+            lines.append("其他变更:")
+            for d in self.other_diffs:
+                lines.append(f"  {d.formatted()}")
+        return "\n".join(lines)
+
+
+@dataclass
+class TemplateRollbackPreview:
+    """版本回滚预览信息"""
+    template_name: str
+    target_version: int
+    current_version: int
+    diff: TemplateDiffResult
+    affected_filters: list[str] = field(default_factory=list)
+    affected_updates: list[str] = field(default_factory=list)
+
+    def formatted(self) -> str:
+        lines = [f"即将回滚模板 '{self.template_name}' 到版本 {self.target_version}（当前最新版本 {self.current_version}）"]
+        lines.append("=" * 60)
+        if self.affected_filters:
+            lines.append("")
+            lines.append(f"将影响以下 {len(self.affected_filters)} 个筛选条件字段:")
+            for f in self.affected_filters:
+                lines.append(f"  - {f}")
+        else:
+            lines.append("")
+            lines.append("筛选条件无变化。")
+        if self.affected_updates:
+            lines.append("")
+            lines.append(f"将影响以下 {len(self.affected_updates)} 个批量更新字段:")
+            for u in self.affected_updates:
+                lines.append(f"  - {u}")
+        else:
+            lines.append("")
+            lines.append("批量更新内容无变化。")
+        lines.append("")
+        lines.append(self.diff.formatted())
+        return "\n".join(lines)
+
+
+@dataclass
+class TemplateRollbackResult:
+    """版本回滚执行结果"""
+    template_name: str
+    template_id: str
+    from_version: int
+    to_version: int
+    new_version_number: int
+    success: bool
+    error_message: str = ""
+
+    def formatted(self) -> str:
+        if self.success:
+            return (f"模板 '{self.template_name}' 已成功回滚到版本 {self.to_version}。\n"
+                    f"产生新版本号: {self.new_version_number}（从 v{self.from_version} 回滚）")
+        return f"模板 '{self.template_name}' 回滚失败: {self.error_message}"
+
+
+class TemplateVersionError(TemplateError):
+    """模板版本操作错误"""
+    pass
+
+
 class TemplateManager:
     """批量任务模板管理器"""
 
@@ -188,7 +303,10 @@ class TemplateManager:
     def save_template(self, name: str, description: str,
                       batch_filter: BatchFilter, batch_update: BatchUpdate,
                       conflict_strategy: Optional[str] = None,
-                      overwrite: bool = False) -> BatchTemplate:
+                      overwrite: bool = False,
+                      operator: str = "",
+                      source_file: str = "",
+                      operation_override: Optional[str] = None) -> BatchTemplate:
         if not name or not name.strip():
             raise TemplateError("模板名称不能为空")
 
@@ -207,6 +325,9 @@ class TemplateManager:
                 batch_update.note is None):
             raise TemplateError("模板没有指定任何更新内容")
 
+        filters_json = batch_filter.to_json()
+        updates_json = batch_update.to_json()
+
         existing = self.db.get_template_by_name(name)
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -220,28 +341,69 @@ class TemplateManager:
             self.db.update_template(
                 template_id=template_id,
                 description=description,
-                filters=batch_filter.to_json(),
-                updates=batch_update.to_json(),
+                filters=filters_json,
+                updates=updates_json,
                 conflict_strategy=conflict_strategy,
                 updated_at=now,
             )
+            op_type = operation_override or TEMPLATE_VERSION_OP_OVERWRITE
+            parent_version = self.db.get_next_template_version(template_id) - 1
+            change_summary = self._build_change_summary(existing, description, filters_json, updates_json, conflict_strategy)
         else:
             template_id = "TPL-" + uuid.uuid4().hex[:12].upper()
             self.db.insert_template(
                 template_id=template_id,
                 name=name,
                 description=description,
-                filters=batch_filter.to_json(),
-                updates=batch_update.to_json(),
+                filters=filters_json,
+                updates=updates_json,
                 conflict_strategy=conflict_strategy,
                 created_at=now,
                 updated_at=now,
             )
+            op_type = operation_override or TEMPLATE_VERSION_OP_CREATE
+            parent_version = 0
+            change_summary = "模板新建"
+
+        version_number = self.db.get_next_template_version(template_id)
+        self.db.insert_template_version(
+            template_id=template_id,
+            template_name=name,
+            version=version_number,
+            description=description,
+            filters=filters_json,
+            updates=updates_json,
+            conflict_strategy=conflict_strategy,
+            operation_type=op_type,
+            operator=operator,
+            source_file=source_file,
+            parent_version=parent_version,
+            branch_tag="",
+            change_summary=change_summary,
+        )
 
         saved = self.db.get_template(template_id)
         if saved is None:
             raise TemplateError(f"保存模板失败: {name}")
         return saved
+
+    def _build_change_summary(self, old: BatchTemplate, new_description: str,
+                              new_filters_json: str, new_updates_json: str,
+                              new_conflict_strategy: str) -> str:
+        """构建两个模板版本之间的变更摘要"""
+        import json as _json
+        changes = []
+        if old.description != new_description:
+            changes.append("描述")
+        if old.filters != new_filters_json:
+            changes.append("筛选条件")
+        if old.updates != new_updates_json:
+            changes.append("更新内容")
+        if old.conflict_strategy != new_conflict_strategy:
+            changes.append("冲突策略")
+        if not changes:
+            return "内容未变更"
+        return "变更: " + ", ".join(changes)
 
     def get_template(self, name: str) -> Optional[BatchTemplate]:
         if not name or not name.strip():
@@ -258,7 +420,8 @@ class TemplateManager:
         return self.db.get_all_templates()
 
     def copy_template(self, source_name: str, target_name: str,
-                      new_description: Optional[str] = None) -> BatchTemplate:
+                      new_description: Optional[str] = None,
+                      operator: str = "") -> BatchTemplate:
         if not target_name or not target_name.strip():
             raise TemplateError("目标模板名称不能为空")
         target_name = target_name.strip()
@@ -274,28 +437,53 @@ class TemplateManager:
         if description is None:
             description = source.description + " (副本)" if source.description else "(副本)"
 
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        new_id = "TPL-" + uuid.uuid4().hex[:12].upper()
-        self.db.insert_template(
-            template_id=new_id,
-            name=target_name,
-            description=description,
-            filters=source.filters,
-            updates=source.updates,
-            conflict_strategy=source.conflict_strategy,
-            created_at=now,
-            updated_at=now,
+        filter_dict = json.loads(source.filters)
+        update_dict = json.loads(source.updates)
+        bf = BatchFilter(
+            event_ids=filter_dict.get("event_ids"),
+            device_ids=filter_dict.get("device_ids"),
+            statuses=filter_dict.get("statuses"),
+            time_from=filter_dict.get("time_from"),
+            time_to=filter_dict.get("time_to"),
+        )
+        bu = BatchUpdate(
+            status=update_dict.get("status"),
+            handler=update_dict.get("handler"),
+            note=update_dict.get("note"),
         )
 
-        result = self.db.get_template(new_id)
-        if result is None:
-            raise TemplateError(f"复制模板失败: {source_name} → {target_name}")
-        return result
+        return self.save_template(
+            name=target_name,
+            description=description,
+            batch_filter=bf,
+            batch_update=bu,
+            conflict_strategy=source.conflict_strategy,
+            operator=operator,
+            operation_override=TEMPLATE_VERSION_OP_CREATE,
+        )
 
-    def delete_template(self, name: str) -> bool:
+    def delete_template(self, name: str, operator: str = "") -> bool:
         template = self.get_template(name)
         if template is None:
             return False
+
+        version_number = self.db.get_next_template_version(template.id)
+        self.db.insert_template_version(
+            template_id=template.id,
+            template_name=template.name,
+            version=version_number,
+            description=template.description,
+            filters=template.filters,
+            updates=template.updates,
+            conflict_strategy=template.conflict_strategy,
+            operation_type=TEMPLATE_VERSION_OP_DELETE_BACKUP,
+            operator=operator,
+            source_file="",
+            parent_version=version_number - 1 if version_number > 1 else 0,
+            branch_tag="",
+            change_summary="删除前备份快照，可用于恢复",
+        )
+
         self.db.delete_template(template.id)
         return True
 
@@ -741,6 +929,9 @@ class TemplateManager:
                 )
 
                 try:
+                    op_override = (TEMPLATE_VERSION_OP_OVERWRITE
+                                   if item_status == "overwritten"
+                                   else TEMPLATE_VERSION_OP_IMPORT)
                     self.save_template(
                         name=final_name,
                         description=description,
@@ -748,6 +939,9 @@ class TemplateManager:
                         batch_update=batch_update,
                         conflict_strategy=tpl_cs,
                         overwrite=(item_status == "overwritten"),
+                        operator=operator,
+                        source_file=source_file,
+                        operation_override=op_override,
                     )
                     result.success_count += 1
                     if item_status == "overwritten":
@@ -952,3 +1146,429 @@ class TemplateManager:
                 lines.append(line)
 
         return "\n".join(lines)
+
+    # ============ 版本历史查询 ============
+
+    def list_template_versions(self, name: str) -> list[TemplateVersion]:
+        """获取指定模板的所有版本历史（包括同名已删除分支，按版本号降序）"""
+        template = self.get_template(name)
+        all_versions = self.db.get_template_versions_by_name(name)
+        if not all_versions and template is None:
+            raise TemplateVersionError(
+                f"模板不存在: '{name}'。使用 template-list 查看所有模板。"
+            )
+        if template is not None:
+            current_versions = self.db.get_template_versions(template.id)
+            existing_ids = {v.id for v in current_versions}
+            for v in all_versions:
+                if v.id not in existing_ids:
+                    current_versions.append(v)
+            current_versions.sort(key=lambda v: v.version, reverse=True)
+            return current_versions
+        all_versions.sort(key=lambda v: v.version, reverse=True)
+        return all_versions
+
+    def format_template_versions(self, versions: list[TemplateVersion]) -> str:
+        """格式化版本列表输出"""
+        if not versions:
+            return "该模板暂无版本历史记录。"
+
+        op_labels = {
+            TEMPLATE_VERSION_OP_CREATE: "新建",
+            TEMPLATE_VERSION_OP_UPDATE: "修改",
+            TEMPLATE_VERSION_OP_OVERWRITE: "覆盖",
+            TEMPLATE_VERSION_OP_IMPORT: "导入",
+            TEMPLATE_VERSION_OP_DELETE_BACKUP: "删除备份",
+            TEMPLATE_VERSION_OP_ROLLBACK: "回滚",
+        }
+
+        template_name = versions[0].template_name
+        template_ids = sorted({v.template_id for v in versions})
+        id_info = "" if len(template_ids) == 1 else f"（{len(template_ids)} 个历史分叉）"
+        lines = [f"模板 '{template_name}' 共 {len(versions)} 个版本历史{id_info}:"]
+        lines.append("")
+        header = (f"{'版本':<8} {'操作':<8} {'操作人':<12} "
+                  f"{'快照时间':<20} 变更摘要")
+        lines.append(header)
+        lines.append("-" * len(header))
+
+        for v in versions:
+            op = op_labels.get(v.operation_type, v.operation_type)
+            operator = v.operator or "-"
+            ver_str = f"v{v.version}"
+            branch_tag = f" [{v.branch_tag}]" if v.branch_tag else ""
+            lines.append(
+                f"{ver_str:<8} {op:<8} {operator:<12} "
+                f"{v.snapshot_at:<20} {v.change_summary}{branch_tag}"
+            )
+
+        return "\n".join(lines)
+
+    # ============ 版本差异对比 ============
+
+    def _version_to_dicts(self, version: TemplateVersion) -> tuple[dict, dict]:
+        """将版本快照的 filters/updates JSON 转为字典"""
+        return json.loads(version.filters), json.loads(version.updates)
+
+    def _template_to_dicts(self, template: BatchTemplate) -> tuple[dict, dict]:
+        """将模板的 filters/updates JSON 转为字典"""
+        return json.loads(template.filters), json.loads(template.updates)
+
+    def diff_template_versions(self, name: str, version_a: int,
+                               version_b: int) -> TemplateDiffResult:
+        """对比指定模板的两个版本差异（支持跨分支版本）"""
+        va = self._find_version_by_number(name, version_a)
+        vb = self._find_version_by_number(name, version_b)
+
+        fa, ua = self._version_to_dicts(va)
+        fb, ub = self._version_to_dicts(vb)
+
+        return self._build_diff(name, version_a, version_b, fa, ua, va, fb, ub, vb)
+
+    def diff_template_version_with_current(self, name: str,
+                                           version: int) -> TemplateDiffResult:
+        """对比指定版本与当前模板的差异（支持跨分支版本）"""
+        template = self.get_template_or_error(name)
+        v = self._find_version_by_number(name, version)
+
+        f_current, u_current = self._template_to_dicts(template)
+        f_old, u_old = self._version_to_dicts(v)
+        return self._build_diff(name, version, 0, f_old, u_old, v,
+                                f_current, u_current, None)
+
+    def _build_diff(self, name: str, ver_a: int, ver_b: int,
+                    fa: dict, ua: dict, va_obj: Optional[TemplateVersion],
+                    fb: dict, ub: dict, vb_obj: Optional[TemplateVersion]) -> TemplateDiffResult:
+        """构建两个版本之间的差异"""
+        result = TemplateDiffResult(
+            template_name=name,
+            old_version=ver_a,
+            new_version=ver_b if ver_b > 0 else -1,
+        )
+
+        filter_fields = [
+            ("event_ids", "事件ID"),
+            ("device_ids", "设备编号"),
+            ("statuses", "状态"),
+            ("time_from", "起始时间"),
+            ("time_to", "结束时间"),
+        ]
+        for key, label in filter_fields:
+            if fa.get(key) != fb.get(key):
+                result.filter_diffs.append(TemplateFieldDiff(
+                    field=label,
+                    old_value=fa.get(key),
+                    new_value=fb.get(key),
+                ))
+
+        update_fields = [
+            ("status", "目标状态"),
+            ("handler", "处理人"),
+            ("note", "备注"),
+        ]
+        for key, label in update_fields:
+            if ua.get(key) != ub.get(key):
+                result.update_diffs.append(TemplateFieldDiff(
+                    field=label,
+                    old_value=ua.get(key),
+                    new_value=ub.get(key),
+                ))
+
+        desc_a = va_obj.description if va_obj else ""
+        desc_b = vb_obj.description if vb_obj else ""
+        if desc_a != desc_b:
+            result.other_diffs.append(TemplateFieldDiff(
+                field="描述", old_value=desc_a, new_value=desc_b,
+            ))
+
+        cs_a = va_obj.conflict_strategy if va_obj else ""
+        cs_b = vb_obj.conflict_strategy if vb_obj else ""
+        if cs_a != cs_b:
+            result.other_diffs.append(TemplateFieldDiff(
+                field="冲突策略", old_value=cs_a, new_value=cs_b,
+            ))
+
+        return result
+
+    # ============ 版本兼容性检查 ============
+
+    def validate_version_for_rollback(self, version: TemplateVersion
+                                      ) -> TemplateValidationResult:
+        """验证某个历史版本是否与当前配置兼容（用于回滚前检查）"""
+        temp_template = BatchTemplate(
+            id=version.template_id,
+            name=version.template_name,
+            description=version.description,
+            filters=version.filters,
+            updates=version.updates,
+            conflict_strategy=version.conflict_strategy,
+            created_at="",
+            updated_at="",
+        )
+        return self.validate_template(temp_template)
+
+    def check_name_branch_conflict(self, template_name: str,
+                                   target_version: TemplateVersion) -> Optional[str]:
+        """检查同名模板分叉冲突。如果目标版本来自另一个 template_id 但同名，返回处理建议"""
+        all_versions = self.db.get_template_versions_by_name(template_name)
+        if not all_versions:
+            return None
+
+        current = self.get_template(template_name)
+        if current is None:
+            existing_template_ids = {v.template_id for v in all_versions}
+            if len(existing_template_ids) > 1:
+                ids_list = ", ".join(sorted(existing_template_ids))
+                return (
+                    f"发现同名模板 '{template_name}' 存在多个历史分叉（template_id: {ids_list}）。\n"
+                    f"处理建议：\n"
+                    f"  1. 使用 template-copy 为目标版本创建新名称的副本\n"
+                    f"  2. 先删除当前模板（版本历史保留），再使用目标版本号回滚\n"
+                    f"  3. 明确指定要基于哪个 template_id 的版本回滚（当前不支持，请使用方案1或2）"
+                )
+            return None
+
+        if current.id != target_version.template_id:
+            return (
+                f"目标版本（template_id={target_version.template_id}）"
+                f"与当前模板（template_id={current.id}）"
+                f"名称相同但来源不同，存在同名分叉。\n"
+                f"处理建议：\n"
+                f"  1. 使用 template-copy 将目标版本内容复制为新名称的模板\n"
+                f"  2. 先 template-delete 当前模板（版本历史保留），再回滚\n"
+                f"  3. 放弃回滚，手动修改当前模板以匹配目标版本内容"
+            )
+        return None
+
+    # ============ 版本回滚 ============
+
+    def _find_version_by_number(self, name: str, target_version: int) -> TemplateVersion:
+        """从所有同名版本中查找指定版本号（跨分支）。
+        若多个分支有相同版本号，抛出歧义错误，提示处理建议。"""
+        all_versions = self.db.get_template_versions_by_name(name)
+        if not all_versions:
+            raise TemplateVersionError(
+                f"模板 '{name}' 的版本历史为空。"
+                f"使用 template-list 查看所有模板。"
+            )
+        matches = [v for v in all_versions if v.version == target_version]
+        if not matches:
+            available = sorted({v.version for v in all_versions})
+            raise TemplateVersionError(
+                f"模板 '{name}' 的版本 {target_version} 不存在。"
+                f"可用版本: {available}。"
+                f"使用 template-versions {name} 查看详细列表。"
+            )
+        current = self.get_template(name)
+        match_template_ids = {v.template_id for v in matches}
+        if len(match_template_ids) > 1:
+            ids_list = ", ".join(sorted(match_template_ids))
+            raise TemplateVersionError(
+                f"版本 {target_version} 在多个同名分叉中同时存在（template_id: {ids_list}），存在歧义。\n"
+                f"处理建议：\n"
+                f"  1. 使用 template-versions {name} 查看各分支版本详情\n"
+                f"  2. 若想基于旧分支版本恢复，先 template-delete 当前模板（版本历史保留），再执行回滚\n"
+                f"  3. 使用 template-copy 将目标内容复制为新名称的模板"
+            )
+        if current is not None and current.id not in match_template_ids:
+            only_match = matches[0]
+            raise TemplateVersionError(
+                f"目标版本 v{target_version}（template_id={only_match.template_id}）"
+                f"与当前模板（template_id={current.id}）名称相同但属于不同分叉。\n"
+                f"处理建议：\n"
+                f"  1. 先 template-delete 当前模板（版本历史保留），再执行回滚\n"
+                f"  2. 使用 template-copy 将目标版本内容复制为新名称的模板"
+            )
+        return matches[0]
+
+    def preview_rollback(self, name: str, target_version: int
+                         ) -> TemplateRollbackPreview:
+        """预览回滚到指定版本的影响"""
+        template = self.get_template_or_error(name)
+        version_obj = self._find_version_by_number(name, target_version)
+
+        validation = self.validate_version_for_rollback(version_obj)
+        if not validation.is_valid:
+            raise TemplateVersionError(
+                f"目标版本与当前配置不兼容，无法回滚：\n{validation.formatted()}\n"
+                f"处理建议：\n"
+                f"  1. 修复兼容性问题后重新保存该版本\n"
+                f"  2. 选择其他兼容的历史版本\n"
+                f"  3. 使用 --no-validate 跳过兼容性检查（不推荐，可能导致模板无法执行）"
+            )
+
+        conflict_msg = self.check_name_branch_conflict(name, version_obj)
+        if conflict_msg:
+            raise TemplateVersionError(conflict_msg)
+
+        current_max = self.db.get_next_template_version(template.id) - 1
+        diff = self.diff_template_versions(name, target_version, current_max)
+
+        affected_filters = [d.field for d in diff.filter_diffs]
+        affected_updates = [d.field for d in diff.update_diffs]
+
+        return TemplateRollbackPreview(
+            template_name=name,
+            target_version=target_version,
+            current_version=current_max,
+            diff=diff,
+            affected_filters=affected_filters,
+            affected_updates=affected_updates,
+        )
+
+    def rollback_template(self, name: str, target_version: int,
+                          operator: str = "",
+                          validate_compatibility: bool = True
+                          ) -> TemplateRollbackResult:
+        """将模板回滚到指定历史版本"""
+        template = self.get_template_or_error(name)
+
+        try:
+            version_obj = self._find_version_by_number(name, target_version)
+        except TemplateVersionError as e:
+            return TemplateRollbackResult(
+                template_name=name,
+                template_id=template.id,
+                from_version=0,
+                to_version=target_version,
+                new_version_number=0,
+                success=False,
+                error_message=str(e),
+            )
+
+        if validate_compatibility:
+            validation = self.validate_version_for_rollback(version_obj)
+            if not validation.is_valid:
+                return TemplateRollbackResult(
+                    template_name=name,
+                    template_id=template.id,
+                    from_version=0,
+                    to_version=target_version,
+                    new_version_number=0,
+                    success=False,
+                    error_message=f"目标版本与当前配置不兼容：{validation.formatted()}",
+                )
+
+        conflict_msg = self.check_name_branch_conflict(name, version_obj)
+        if conflict_msg:
+            return TemplateRollbackResult(
+                template_name=name,
+                template_id=template.id,
+                from_version=0,
+                to_version=target_version,
+                new_version_number=0,
+                success=False,
+                error_message=conflict_msg,
+            )
+
+        filter_dict = json.loads(version_obj.filters)
+        update_dict = json.loads(version_obj.updates)
+        bf = BatchFilter(
+            event_ids=filter_dict.get("event_ids"),
+            device_ids=filter_dict.get("device_ids"),
+            statuses=filter_dict.get("statuses"),
+            time_from=filter_dict.get("time_from"),
+            time_to=filter_dict.get("time_to"),
+        )
+        bu = BatchUpdate(
+            status=update_dict.get("status"),
+            handler=update_dict.get("handler"),
+            note=update_dict.get("note"),
+        )
+
+        current_max = self.db.get_next_template_version(template.id) - 1
+
+        try:
+            self.save_template(
+                name=name,
+                description=version_obj.description,
+                batch_filter=bf,
+                batch_update=bu,
+                conflict_strategy=version_obj.conflict_strategy,
+                overwrite=True,
+                operator=operator,
+                operation_override=TEMPLATE_VERSION_OP_ROLLBACK,
+            )
+        except TemplateError as e:
+            return TemplateRollbackResult(
+                template_name=name,
+                template_id=template.id,
+                from_version=current_max,
+                to_version=target_version,
+                new_version_number=0,
+                success=False,
+                error_message=str(e),
+            )
+
+        new_version = self.db.get_next_template_version(template.id) - 1
+
+        return TemplateRollbackResult(
+            template_name=name,
+            template_id=template.id,
+            from_version=current_max,
+            to_version=target_version,
+            new_version_number=new_version,
+            success=True,
+        )
+
+    # ============ 删除后恢复 ============
+
+    def restore_deleted_template(self, name: str, operator: str = ""
+                                 ) -> Optional[BatchTemplate]:
+        """从删除前的备份快照恢复已删除的模板（复用原 template_id）"""
+        versions = self.db.get_template_versions_by_name(name)
+        delete_versions = [v for v in versions
+                           if v.operation_type == TEMPLATE_VERSION_OP_DELETE_BACKUP]
+        if not delete_versions:
+            return None
+
+        latest = delete_versions[0]
+        filter_dict = json.loads(latest.filters)
+        update_dict = json.loads(latest.updates)
+        bf = BatchFilter(
+            event_ids=filter_dict.get("event_ids"),
+            device_ids=filter_dict.get("device_ids"),
+            statuses=filter_dict.get("statuses"),
+            time_from=filter_dict.get("time_from"),
+            time_to=filter_dict.get("time_to"),
+        )
+        bu = BatchUpdate(
+            status=update_dict.get("status"),
+            handler=update_dict.get("handler"),
+            note=update_dict.get("note"),
+        )
+
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        original_id = latest.template_id
+        self.db.insert_template(
+            template_id=original_id,
+            name=name,
+            description=latest.description,
+            filters=bf.to_json(),
+            updates=bu.to_json(),
+            conflict_strategy=latest.conflict_strategy,
+            created_at=now,
+            updated_at=now,
+        )
+
+        version_number = self.db.get_next_template_version(original_id)
+        self.db.insert_template_version(
+            template_id=original_id,
+            template_name=name,
+            version=version_number,
+            description=latest.description,
+            filters=bf.to_json(),
+            updates=bu.to_json(),
+            conflict_strategy=latest.conflict_strategy,
+            operation_type=TEMPLATE_VERSION_OP_ROLLBACK,
+            operator=operator,
+            source_file="",
+            parent_version=latest.version,
+            branch_tag="",
+            change_summary=f"从删除备份恢复（来源版本 v{latest.version}）",
+        )
+
+        restored = self.db.get_template(original_id)
+        if restored is None:
+            raise TemplateError(f"恢复模板失败: {name}")
+        return restored

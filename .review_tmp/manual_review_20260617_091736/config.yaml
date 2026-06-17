@@ -1,0 +1,56 @@
+validation:
+  device_id_pattern: "^DEV-[A-Z0-9]{3,10}$"
+  time_formats:
+    - "%Y-%m-%d %H:%M:%S"
+    - "%Y-%m-%dT%H:%M:%S"
+    - "%Y/%m/%d %H:%M:%S"
+  valid_issue_types:
+    - temperature
+    - pressure
+    - vibration
+    - voltage
+    - current
+    - connectivity
+    - performance
+    - security
+    - other
+  valid_severities:
+    - critical
+    - warning
+    - info
+
+event_merge:
+  time_window_minutes: 30
+  same_device_only: true
+  same_issue_type: true
+
+export:
+  csv_field_order:
+    - event_id
+    - status
+    - device_id
+    - first_seen
+    - last_seen
+    - severity
+    - issue_type
+    - record_count
+    - handler
+    - note
+    - version
+    - source_record_ids
+
+batch:
+  preview_fields:
+    - event_id
+    - status
+    - device_id
+    - first_seen
+    - last_seen
+    - severity
+    - issue_type
+    - handler
+    - note
+  conflict_strategy: "skip"
+  log_retention_days: 30
+
+db_path: "D:/workSpace/AI__SPACE/lfc-00022/.review_tmp/manual_review_20260617_091736/review.db"

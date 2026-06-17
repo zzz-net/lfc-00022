@@ -25,6 +25,13 @@ from inspection_cli.templates import (
     TemplateError, TemplateExportResult, TemplateImportError,
     TemplateImportItemResult, TemplateImportResult, TemplateManager,
     TemplateValidationIssue, TemplateValidationResult, TEMPLATE_EXPORT_VERSION,
+    TemplateVersionError, TemplateDiffResult, TemplateRollbackPreview,
+    TemplateRollbackResult,
+)
+from inspection_cli.database import (
+    TEMPLATE_VERSION_OP_CREATE, TEMPLATE_VERSION_OP_OVERWRITE,
+    TEMPLATE_VERSION_OP_IMPORT, TEMPLATE_VERSION_OP_DELETE_BACKUP,
+    TEMPLATE_VERSION_OP_ROLLBACK,
 )
 
 
@@ -1661,6 +1668,581 @@ class TestTemplateImportLogs(_TestBase):
         """没有任何操作时日志为空"""
         text = self.template_manager.get_template_import_logs(10)
         self.assertIn("暂无", text)
+
+
+class TestTemplateVersionHistory(_TestBase):
+    """模板版本历史记录功能测试"""
+
+    def test_create_template_creates_version_v1(self):
+        """新建模板自动产生版本1"""
+        tpl = self.template_manager.save_template(
+            name="ver-create",
+            description="初始版本",
+            batch_filter=BatchFilter(statuses=["unconfirmed"]),
+            batch_update=BatchUpdate(status="confirmed", handler="H1"),
+            operator="UserA",
+        )
+        versions = self.template_manager.list_template_versions("ver-create")
+        self.assertEqual(len(versions), 1)
+        self.assertEqual(versions[0].version, 1)
+        self.assertEqual(versions[0].operation_type, TEMPLATE_VERSION_OP_CREATE)
+        self.assertEqual(versions[0].operator, "UserA")
+        self.assertEqual(versions[0].template_name, "ver-create")
+        self.assertEqual(versions[0].template_id, tpl.id)
+
+    def test_overwrite_template_creates_new_version(self):
+        """覆盖模板产生新版本号"""
+        self.template_manager.save_template(
+            name="ver-overwrite",
+            description="v1",
+            batch_filter=BatchFilter(statuses=["unconfirmed"]),
+            batch_update=BatchUpdate(status="confirmed", handler="H1"),
+            operator="UserA",
+        )
+        self.template_manager.save_template(
+            name="ver-overwrite",
+            description="v2",
+            batch_filter=BatchFilter(statuses=["confirmed"]),
+            batch_update=BatchUpdate(status="closed", handler="H2"),
+            overwrite=True,
+            operator="UserB",
+        )
+        versions = self.template_manager.list_template_versions("ver-overwrite")
+        self.assertEqual(len(versions), 2)
+        self.assertEqual(versions[0].version, 2)
+        self.assertEqual(versions[0].operation_type, TEMPLATE_VERSION_OP_OVERWRITE)
+        self.assertEqual(versions[0].operator, "UserB")
+        self.assertEqual(versions[1].version, 1)
+
+    def test_continuous_modifications_produce_monotonic_versions(self):
+        """连续修改产生严格递增的版本号"""
+        names = []
+        for i in range(5):
+            kw = dict(overwrite=(i > 0), operator=f"User{i}") if i > 0 else dict(operator=f"User{i}")
+            tpl = self.template_manager.save_template(
+                name="ver-seq",
+                description=f"v{i+1}",
+                batch_filter=BatchFilter(statuses=["unconfirmed"]),
+                batch_update=BatchUpdate(status="confirmed", handler=f"H{i+1}"),
+                **kw,
+            )
+            names.append(tpl.name)
+
+        versions = self.template_manager.list_template_versions("ver-seq")
+        self.assertEqual(len(versions), 5)
+        version_numbers = [v.version for v in versions]
+        self.assertEqual(version_numbers, [5, 4, 3, 2, 1])
+
+    def test_delete_template_creates_backup_version(self):
+        """删除模板前自动备份为新版本"""
+        self.template_manager.save_template(
+            name="ver-delete",
+            description="待删除",
+            batch_filter=BatchFilter(statuses=["unconfirmed"]),
+            batch_update=BatchUpdate(status="confirmed", handler="HD"),
+            operator="Creator",
+        )
+        v_before = self.template_manager.list_template_versions("ver-delete")
+        n_before = len(v_before)
+
+        deleted = self.template_manager.delete_template("ver-delete", operator="Deleter")
+        self.assertTrue(deleted)
+        self.assertIsNone(self.template_manager.get_template("ver-delete"))
+
+        versions = self.template_manager.list_template_versions("ver-delete")
+        self.assertEqual(len(versions), n_before + 1)
+        backup_ver = versions[0]
+        self.assertEqual(backup_ver.operation_type, TEMPLATE_VERSION_OP_DELETE_BACKUP)
+        self.assertEqual(backup_ver.operator, "Deleter")
+
+    def test_import_creates_version_record(self):
+        """导入模板产生版本记录"""
+        tpl = {
+            "name": "ver-import",
+            "description": "导入而来",
+            "filters": {"statuses": ["unconfirmed"], "event_ids": None,
+                        "device_ids": None, "time_from": None, "time_to": None},
+            "updates": {"status": "confirmed", "handler": "ImportUser", "note": None},
+            "conflict_strategy": "skip",
+        }
+        data = {
+            "version": TEMPLATE_EXPORT_VERSION,
+            "exported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "template_count": 1,
+            "templates": [tpl],
+        }
+        path = os.path.join(self.tmp_dir, "ver-import.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+        result = self.template_manager.import_templates_from_file(
+            path, operator="ImportOp",
+        )
+        self.assertEqual(result.success_count, 1)
+
+        versions = self.template_manager.list_template_versions("ver-import")
+        self.assertEqual(len(versions), 1)
+        self.assertEqual(versions[0].version, 1)
+        self.assertEqual(versions[0].operation_type, TEMPLATE_VERSION_OP_IMPORT)
+        self.assertEqual(versions[0].operator, "ImportOp")
+        self.assertIn("ver-import.json", versions[0].source_file)
+
+    def test_version_history_persists_across_db_restart(self):
+        """版本历史持久化：重启后仍然存在"""
+        self.template_manager.save_template(
+            name="ver-persist",
+            description="v1",
+            batch_filter=BatchFilter(statuses=["unconfirmed"]),
+            batch_update=BatchUpdate(status="confirmed", handler="H1"),
+            operator="PersistUser",
+        )
+        self.template_manager.save_template(
+            name="ver-persist",
+            description="v2",
+            batch_filter=BatchFilter(statuses=["confirmed"]),
+            batch_update=BatchUpdate(status="closed", handler="H2"),
+            overwrite=True,
+            operator="PersistUser",
+        )
+
+        self.db = Database(self.db_path)
+        self.template_manager = TemplateManager(self.db, self.config)
+
+        versions = self.template_manager.list_template_versions("ver-persist")
+        self.assertEqual(len(versions), 2)
+        self.assertEqual(versions[0].version, 2)
+        self.assertEqual(versions[1].version, 1)
+
+    def test_list_versions_nonexistent_template_raises(self):
+        """查询不存在模板的版本应报错"""
+        with self.assertRaises(TemplateVersionError):
+            self.template_manager.list_template_versions("no-such-template")
+
+    def test_format_versions_output(self):
+        """版本列表格式化输出包含关键信息"""
+        self.template_manager.save_template(
+            name="ver-fmt",
+            description="测试",
+            batch_filter=BatchFilter(statuses=["unconfirmed"]),
+            batch_update=BatchUpdate(status="confirmed", handler="HF"),
+            operator="FmtUser",
+        )
+        versions = self.template_manager.list_template_versions("ver-fmt")
+        formatted = self.template_manager.format_template_versions(versions)
+        self.assertIn("版本", formatted)
+        self.assertIn("操作", formatted)
+        self.assertIn("快照时间", formatted)
+        self.assertIn("FmtUser", formatted)
+        self.assertIn("新建", formatted)
+
+
+class TestTemplateVersionDiff(_TestBase):
+    """模板版本差异对比功能测试"""
+
+    def setUp(self):
+        super().setUp()
+        self.template_manager.save_template(
+            name="diff-tpl",
+            description="v1 desc",
+            batch_filter=BatchFilter(
+                statuses=["unconfirmed"],
+                device_ids=["DEV-A001"],
+            ),
+            batch_update=BatchUpdate(status="confirmed", handler="H1"),
+            operator="U1",
+        )
+        self.template_manager.save_template(
+            name="diff-tpl",
+            description="v2 desc",
+            batch_filter=BatchFilter(
+                statuses=["unconfirmed", "confirmed"],
+                device_ids=["DEV-A001", "DEV-A002"],
+                time_from="2026-06-01 00:00:00",
+            ),
+            batch_update=BatchUpdate(status="closed", handler="H2", note="new note"),
+            overwrite=True,
+            operator="U2",
+        )
+
+    def test_diff_between_two_versions(self):
+        """两个历史版本之间的差异"""
+        diff = self.template_manager.diff_template_versions("diff-tpl", 1, 2)
+        self.assertIsInstance(diff, TemplateDiffResult)
+        self.assertTrue(diff.has_changes)
+
+        filter_fields = {d.field for d in diff.filter_diffs}
+        self.assertIn("状态", filter_fields)
+        self.assertIn("设备编号", filter_fields)
+        self.assertIn("起始时间", filter_fields)
+
+        update_fields = {d.field for d in diff.update_diffs}
+        self.assertIn("目标状态", update_fields)
+        self.assertIn("处理人", update_fields)
+        self.assertIn("备注", update_fields)
+
+        other_fields = {d.field for d in diff.other_diffs}
+        self.assertIn("描述", other_fields)
+
+    def test_diff_version_with_current(self):
+        """历史版本与当前模板的差异"""
+        diff = self.template_manager.diff_template_version_with_current("diff-tpl", 1)
+        self.assertTrue(diff.has_changes)
+        self.assertGreaterEqual(len(diff.filter_diffs), 1)
+
+    def test_diff_invalid_version_raises(self):
+        """对比不存在的版本应报错"""
+        with self.assertRaises(TemplateVersionError):
+            self.template_manager.diff_template_versions("diff-tpl", 1, 999)
+
+    def test_diff_same_version_no_changes(self):
+        """同一版本对比无差异"""
+        diff = self.template_manager.diff_template_versions("diff-tpl", 1, 1)
+        self.assertFalse(diff.has_changes)
+
+    def test_diff_formatted_output(self):
+        """差异格式化输出包含字段名和前后值"""
+        diff = self.template_manager.diff_template_versions("diff-tpl", 1, 2)
+        formatted = diff.formatted()
+        self.assertIn("diff-tpl", formatted)
+        self.assertIn("筛选条件变更", formatted)
+        self.assertIn("更新内容变更", formatted)
+        self.assertIn("→", formatted)
+
+
+class TestTemplateVersionRollback(_TestBase):
+    """模板版本回滚功能测试"""
+
+    def setUp(self):
+        super().setUp()
+        self.template_manager.save_template(
+            name="rb-tpl",
+            description="v1",
+            batch_filter=BatchFilter(
+                statuses=["unconfirmed"],
+                device_ids=["DEV-V1"],
+            ),
+            batch_update=BatchUpdate(status="confirmed", handler="V1H"),
+            operator="Creator",
+        )
+        self.template_manager.save_template(
+            name="rb-tpl",
+            description="v2",
+            batch_filter=BatchFilter(
+                statuses=["confirmed"],
+                device_ids=["DEV-V2"],
+            ),
+            batch_update=BatchUpdate(status="closed", handler="V2H"),
+            overwrite=True,
+            operator="Modifier",
+        )
+        self.template_manager.save_template(
+            name="rb-tpl",
+            description="v3",
+            batch_filter=BatchFilter(
+                statuses=["false_positive"],
+                device_ids=["DEV-V3"],
+            ),
+            batch_update=BatchUpdate(status="unconfirmed", handler="V3H"),
+            overwrite=True,
+            operator="Modifier2",
+        )
+
+    def test_rollback_preview_shows_affected_fields(self):
+        """回滚预览正确显示受影响的筛选条件和更新字段"""
+        preview = self.template_manager.preview_rollback("rb-tpl", 1)
+        self.assertIsInstance(preview, TemplateRollbackPreview)
+        self.assertEqual(preview.target_version, 1)
+        self.assertEqual(preview.current_version, 3)
+        self.assertGreater(len(preview.affected_filters), 0)
+        self.assertGreater(len(preview.affected_updates), 0)
+
+        formatted = preview.formatted()
+        self.assertIn("筛选条件字段", formatted)
+        self.assertIn("批量更新字段", formatted)
+
+    def test_rollback_to_previous_version(self):
+        """回滚到指定历史版本"""
+        tpl_before = self.template_manager.get_template("rb-tpl")
+        bf_before, bu_before, cs_before = self.template_manager.template_to_objects(tpl_before)
+        self.assertEqual(bu_before.status, "unconfirmed")
+        self.assertEqual(bu_before.handler, "V3H")
+
+        result = self.template_manager.rollback_template(
+            "rb-tpl", target_version=1, operator="RollbackUser",
+        )
+        self.assertIsInstance(result, TemplateRollbackResult)
+        self.assertTrue(result.success)
+        self.assertEqual(result.to_version, 1)
+        self.assertEqual(result.from_version, 3)
+        self.assertGreater(result.new_version_number, 3)
+
+        tpl_after = self.template_manager.get_template("rb-tpl")
+        bf_after, bu_after, cs_after = self.template_manager.template_to_objects(tpl_after)
+        self.assertEqual(bu_after.status, "confirmed")
+        self.assertEqual(bu_after.handler, "V1H")
+        self.assertEqual(bf_after.device_ids, ["DEV-V1"])
+
+        versions = self.template_manager.list_template_versions("rb-tpl")
+        self.assertEqual(versions[0].operation_type, TEMPLATE_VERSION_OP_ROLLBACK)
+        self.assertEqual(versions[0].operator, "RollbackUser")
+
+    def test_rollback_version_creates_new_version_entry(self):
+        """回滚产生新版本号，旧版本仍保留"""
+        versions_before = self.template_manager.list_template_versions("rb-tpl")
+        n_before = len(versions_before)
+
+        self.template_manager.rollback_template("rb-tpl", target_version=1, operator="RB")
+        versions_after = self.template_manager.list_template_versions("rb-tpl")
+        self.assertEqual(len(versions_after), n_before + 1)
+
+        for i in range(1, n_before + 1):
+            self.assertTrue(
+                any(v.version == i for v in versions_after),
+                f"旧版本 {i} 应仍然存在"
+            )
+
+    def test_rollback_then_export_consistency(self):
+        """回滚后再导出，内容与目标版本一致"""
+        self.template_manager.rollback_template("rb-tpl", target_version=1, operator="RB")
+        tpl_current = self.template_manager.get_template("rb-tpl")
+        bf_cur, bu_cur, cs_cur = self.template_manager.template_to_objects(tpl_current)
+
+        export_data = self.template_manager.export_template("rb-tpl")
+        self.assertEqual(export_data["description"], "v1")
+        self.assertEqual(export_data["filters"]["device_ids"], bf_cur.device_ids)
+        self.assertEqual(export_data["updates"]["status"], bu_cur.status)
+        self.assertEqual(export_data["updates"]["handler"], bu_cur.handler)
+
+        path = os.path.join(self.tmp_dir, "rb-export.json")
+        self.template_manager.export_templates_to_file(
+            path, names=["rb-tpl"], operator="Exporter",
+        )
+        with open(path, "r", encoding="utf-8") as f:
+            file_data = json.load(f)
+        self.assertEqual(file_data["templates"][0]["description"], "v1")
+        self.assertEqual(file_data["templates"][0]["filters"]["statuses"], ["unconfirmed"])
+
+    def test_rollback_invalid_version_fails(self):
+        """回滚到不存在的版本失败"""
+        result = self.template_manager.rollback_template("rb-tpl", target_version=999)
+        self.assertFalse(result.success)
+        self.assertIn("不存在", result.error_message)
+
+    def test_rollback_incompatible_status_blocked(self):
+        """回滚目标版本含不兼容状态枚举时被阻止"""
+        bad_ver = {
+            "name": "rb-bad",
+            "description": "导入坏版本",
+            "filters": {"statuses": ["unconfirmed", "deprecated_status"],
+                        "event_ids": None, "device_ids": None,
+                        "time_from": None, "time_to": None},
+            "updates": {"status": "confirmed", "handler": "H", "note": None},
+            "conflict_strategy": "skip",
+        }
+        path = os.path.join(self.tmp_dir, "rb-bad.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({
+                "version": TEMPLATE_EXPORT_VERSION,
+                "exported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "template_count": 1,
+                "templates": [bad_ver],
+            }, f, ensure_ascii=False, indent=2)
+
+        self.template_manager.import_templates_from_file(
+            path, validate_compatibility=False, operator="BadImporter",
+        )
+        result = self.template_manager.rollback_template("rb-bad", target_version=1)
+        self.assertFalse(result.success)
+        self.assertIn("deprecated_status", result.error_message)
+
+    def test_rollback_no_validate_bypasses_check(self):
+        """--no-validate 可跳过兼容性检查"""
+        bad_ver = {
+            "name": "rb-force",
+            "description": "强转导入",
+            "filters": {"statuses": ["unconfirmed", "old_status"],
+                        "event_ids": None, "device_ids": None,
+                        "time_from": None, "time_to": None},
+            "updates": {"status": "confirmed", "handler": "H", "note": None},
+            "conflict_strategy": "skip",
+        }
+        path = os.path.join(self.tmp_dir, "rb-force.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({
+                "version": TEMPLATE_EXPORT_VERSION,
+                "exported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "template_count": 1,
+                "templates": [bad_ver],
+            }, f, ensure_ascii=False, indent=2)
+
+        self.template_manager.import_templates_from_file(
+            path, validate_compatibility=False, operator="Force",
+        )
+        result = self.template_manager.rollback_template(
+            "rb-force", target_version=1, validate_compatibility=False,
+        )
+        self.assertTrue(result.success)
+
+    def test_import_then_rollback_audit_consistency(self):
+        """导入后回滚：审计日志和版本记录一致"""
+        tpl = {
+            "name": "rb-audit",
+            "description": "审计测试",
+            "filters": {"statuses": ["unconfirmed"], "event_ids": None,
+                        "device_ids": None, "time_from": None, "time_to": None},
+            "updates": {"status": "confirmed", "handler": "ImportH", "note": None},
+            "conflict_strategy": "skip",
+        }
+        path = os.path.join(self.tmp_dir, "rb-audit.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({
+                "version": TEMPLATE_EXPORT_VERSION,
+                "exported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "template_count": 1,
+                "templates": [tpl],
+            }, f, ensure_ascii=False, indent=2)
+
+        import_result = self.template_manager.import_templates_from_file(
+            path, operator="Auditor",
+        )
+        self.assertIsNotNone(import_result.log_id)
+
+        self.template_manager.rollback_template(
+            "rb-audit", target_version=1, operator="RBR",
+        )
+
+        versions = self.template_manager.list_template_versions("rb-audit")
+        self.assertEqual(versions[1].operation_type, TEMPLATE_VERSION_OP_IMPORT)
+        self.assertEqual(versions[1].operator, "Auditor")
+        self.assertEqual(versions[0].operation_type, TEMPLATE_VERSION_OP_ROLLBACK)
+        self.assertEqual(versions[0].operator, "RBR")
+
+        logs = self.template_manager.get_template_import_logs(10)
+        self.assertIn("Auditor", logs)
+
+
+class TestTemplateVersionBranchConflict(_TestBase):
+    """同名模板分叉冲突测试"""
+
+    def test_same_name_different_template_id_detected(self):
+        """同名不同 template_id 的版本分叉被检测并给出建议"""
+        self.template_manager.save_template(
+            name="branch-tpl",
+            description="分支A",
+            batch_filter=BatchFilter(statuses=["unconfirmed"]),
+            batch_update=BatchUpdate(status="confirmed", handler="BranchA"),
+            operator="UserA",
+        )
+        tpl_a = self.template_manager.get_template("branch-tpl")
+        id_a = tpl_a.id
+
+        self.template_manager.delete_template("branch-tpl", operator="Deleter")
+
+        self.template_manager.save_template(
+            name="branch-tpl",
+            description="分支B",
+            batch_filter=BatchFilter(statuses=["confirmed"]),
+            batch_update=BatchUpdate(status="closed", handler="BranchB"),
+            operator="UserB",
+        )
+        tpl_b = self.template_manager.get_template("branch-tpl")
+        id_b = tpl_b.id
+
+        self.assertNotEqual(id_a, id_b)
+
+        all_versions = self.template_manager.list_template_versions("branch-tpl")
+        template_ids = {v.template_id for v in all_versions}
+        self.assertEqual(len(template_ids), 2)
+
+        target_ver_a = self.db.get_template_version_by_number(id_a, 1)
+        self.assertIsNotNone(target_ver_a)
+
+        conflict_msg = self.template_manager.check_name_branch_conflict("branch-tpl", target_ver_a)
+        self.assertIsNotNone(conflict_msg)
+        self.assertIn("分叉", conflict_msg)
+        self.assertIn("template-copy", conflict_msg)
+        self.assertIn("处理建议", conflict_msg)
+
+    def test_rollback_across_branch_blocked(self):
+        """跨分叉回滚被阻止"""
+        self.template_manager.save_template(
+            name="cross-branch",
+            description="分支1",
+            batch_filter=BatchFilter(statuses=["unconfirmed"]),
+            batch_update=BatchUpdate(status="confirmed", handler="B1"),
+            operator="U1",
+        )
+        id_1 = self.template_manager.get_template("cross-branch").id
+
+        self.template_manager.delete_template("cross-branch", operator="D")
+
+        self.template_manager.save_template(
+            name="cross-branch",
+            description="分支2",
+            batch_filter=BatchFilter(statuses=["confirmed"]),
+            batch_update=BatchUpdate(status="closed", handler="B2"),
+            operator="U2",
+        )
+
+        result = self.template_manager.rollback_template("cross-branch", target_version=1)
+        self.assertFalse(result.success)
+        self.assertIn("分叉", result.error_message)
+
+
+class TestDeletedTemplateRestore(_TestBase):
+    """删除后模板恢复测试"""
+
+    def test_restore_deleted_template_from_backup(self):
+        """从删除备份恢复已删除的模板"""
+        self.template_manager.save_template(
+            name="restore-tpl",
+            description="原始模板",
+            batch_filter=BatchFilter(
+                statuses=["unconfirmed"],
+                device_ids=["DEV-RESTORE"],
+            ),
+            batch_update=BatchUpdate(status="confirmed", handler="Restorer"),
+            operator="Creator",
+        )
+        tpl = self.template_manager.get_template("restore-tpl")
+        bf_orig, bu_orig, cs_orig = self.template_manager.template_to_objects(tpl)
+
+        self.template_manager.delete_template("restore-tpl", operator="Deleter")
+        self.assertIsNone(self.template_manager.get_template("restore-tpl"))
+
+        restored = self.template_manager.restore_deleted_template("restore-tpl", operator="Restorer")
+        self.assertIsNotNone(restored)
+        self.assertEqual(restored.name, "restore-tpl")
+        self.assertEqual(restored.description, "原始模板")
+
+        bf_new, bu_new, cs_new = self.template_manager.template_to_objects(restored)
+        self.assertEqual(bf_orig.device_ids, bf_new.device_ids)
+        self.assertEqual(bf_orig.statuses, bf_new.statuses)
+        self.assertEqual(bu_orig.status, bu_new.status)
+        self.assertEqual(bu_orig.handler, bu_new.handler)
+        self.assertEqual(cs_orig, cs_new)
+
+    def test_restore_nonexistent_returns_none(self):
+        """恢复不存在的模板返回 None"""
+        result = self.template_manager.restore_deleted_template("never-existed")
+        self.assertIsNone(result)
+
+    def test_restore_version_history_includes_restore(self):
+        """恢复操作在版本历史中有记录"""
+        self.template_manager.save_template(
+            name="rv-tpl",
+            description="test",
+            batch_filter=BatchFilter(statuses=["unconfirmed"]),
+            batch_update=BatchUpdate(status="confirmed", handler="H"),
+            operator="C",
+        )
+        self.template_manager.delete_template("rv-tpl", operator="D")
+        self.template_manager.restore_deleted_template("rv-tpl", operator="R")
+
+        versions = self.template_manager.list_template_versions("rv-tpl")
+        operations = [v.operation_type for v in versions]
+        self.assertIn(TEMPLATE_VERSION_OP_DELETE_BACKUP, operations)
+        self.assertIn(TEMPLATE_VERSION_OP_ROLLBACK, operations)
 
 
 if __name__ == "__main__":

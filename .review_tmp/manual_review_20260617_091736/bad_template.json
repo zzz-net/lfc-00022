@@ -1,0 +1,27 @@
+{
+  "version": "1.0",
+  "exported_at": "2026-06-17 09:17:36",
+  "template_count": 1,
+  "templates": [
+    {
+      "name": "legacy-bad",
+      "description": "legacy incompatible template",
+      "filters": {
+        "statuses": [
+          "unconfirmed",
+          "deprecated_status"
+        ],
+        "event_ids": null,
+        "device_ids": null,
+        "time_from": null,
+        "time_to": null
+      },
+      "updates": {
+        "status": "confirmed",
+        "handler": "LegacyH",
+        "note": null
+      },
+      "conflict_strategy": "skip"
+    }
+  ]
+}

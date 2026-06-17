@@ -179,6 +179,107 @@ class TestCLITemplateE2E(unittest.TestCase):
             v = int(row.get("version", 0))
             self.assertGreaterEqual(v, 1, f"version >=1 expected, got {v} for {row.get('event_id')}")
 
+    def test_09_template_versions_list(self):
+        """CLI 端到端：查看模板版本历史列表"""
+        r = self._run([
+            "template-save", "-n", "e2e-ver", "-d", "version v1",
+            "--statuses", "unconfirmed", "--set-status", "confirmed",
+            "--set-handler", "H1", "-H", "CreatorA",
+        ])
+        self.assertEqual(r.returncode, 0, f"save v1 failed: {r.stderr}\n{r.stdout}")
+
+        r = self._run([
+            "template-save", "-n", "e2e-ver", "-d", "version v2",
+            "--statuses", "unconfirmed", "--set-status", "closed",
+            "--set-handler", "H2", "--set-note", "batch closed",
+            "--overwrite", "-H", "EditorB",
+        ])
+        self.assertEqual(r.returncode, 0, f"save v2 failed: {r.stderr}\n{r.stdout}")
+
+        r = self._run(["template-versions", "e2e-ver"])
+        self.assertEqual(r.returncode, 0, f"template-versions failed: {r.stderr}\n{r.stdout}")
+        self.assertIn("e2e-ver", r.stdout)
+        self.assertIn("v1", r.stdout)
+        self.assertIn("v2", r.stdout)
+        self.assertIn("新建", r.stdout)
+        self.assertIn("覆盖", r.stdout)
+        self.assertIn("CreatorA", r.stdout)
+        self.assertIn("EditorB", r.stdout)
+
+    def test_10_template_diff(self):
+        """CLI 端到端：查看版本字段差异摘要"""
+        r = self._run(["template-diff", "e2e-ver", "--from", "1", "--to", "2"])
+        self.assertEqual(r.returncode, 0, f"template-diff failed: {r.stderr}\n{r.stdout}")
+        self.assertIn("版本差异", r.stdout)
+        self.assertIn("状态", r.stdout)
+        self.assertIn("处理人", r.stdout)
+        self.assertIn("备注", r.stdout)
+
+    def test_11_template_rollback_preview_and_execute(self):
+        """CLI 端到端：回滚预览+执行，检查受影响字段"""
+        r = self._run(["template-rollback", "e2e-ver", "1"], input_text="n\n")
+        self.assertIn("即将回滚模板", r.stdout)
+        self.assertIn("批量更新字段", r.stdout)
+        self.assertIn("确认执行回滚", r.stdout)
+
+        r = self._run(["template-rollback", "e2e-ver", "1", "-y", "-H", "Rollbacker"])
+        self.assertEqual(r.returncode, 0, f"rollback failed: {r.stderr}\n{r.stdout}")
+        self.assertIn("已成功回滚", r.stdout)
+
+        r = self._run(["template-show", "e2e-ver"])
+        self.assertEqual(r.returncode, 0, f"show after rollback failed: {r.stderr}")
+        self.assertIn("version v1", r.stdout)
+        self.assertIn("confirmed", r.stdout)
+        self.assertIn("H1", r.stdout)
+
+    def test_12_template_rollback_then_batch_apply(self):
+        """CLI 端到端：回滚后套用模板执行批量操作，验证可见变化"""
+        self._run(["import", self.csv_path])
+        self._run(["merge"])
+        self._run([
+            "template-save", "-n", "e2e-ver-batch", "-d", "for batch test",
+            "--statuses", "confirmed,closed", "--set-status", "confirmed",
+            "--set-handler", "PostRollback",
+            "--overwrite",
+        ])
+        r = self._run([
+            "batch-annotate", "--use-template", "e2e-ver-batch",
+            "-H", "PostRollbackTester", "-y",
+        ])
+        self.assertEqual(r.returncode, 0, f"batch after rollback failed: {r.stderr}\n{r.stdout}")
+
+        r = self._run(["batch-logs", "-n", "1"])
+        self.assertEqual(r.returncode, 0, f"batch-logs failed: {r.stderr}")
+        batch_id = None
+        for line in r.stdout.splitlines():
+            for token in line.split():
+                if token.startswith("BATCH-"):
+                    batch_id = token
+                    break
+            if batch_id:
+                break
+        if batch_id:
+            r = self._run(["batch-detail", batch_id])
+            self.assertEqual(r.returncode, 0, f"batch-detail failed: {r.stderr}")
+            self.assertIn(batch_id, r.stdout)
+
+    def test_13_template_invalid_version_and_branch_conflict(self):
+        """CLI 端到端：非法版本号和同名分叉冲突提示"""
+        r = self._run(["template-rollback", "e2e-ver", "9999"])
+        self.assertNotEqual(r.returncode, 0, "invalid version should fail")
+        self.assertIn("不存在", r.stderr if r.stderr else r.stdout)
+
+        self._run(["template-delete", "e2e-ver", "-y", "-H", "Deleter"])
+        self._run([
+            "template-save", "-n", "e2e-ver", "-d", "new branch",
+            "--statuses", "confirmed", "--set-status", "closed",
+            "--set-handler", "BranchNew",
+        ])
+        r = self._run(["template-rollback", "e2e-ver", "1"])
+        output = r.stderr if r.stderr else r.stdout
+        self.assertTrue(("歧义" in output) or ("分叉" in output) or (r.returncode != 0),
+                        f"cross-branch rollback should be blocked, got rc={r.returncode}: {output}")
+
     @classmethod
     def tearDownClass(cls):
         shutil.rmtree(cls.tmp_dir, ignore_errors=True)

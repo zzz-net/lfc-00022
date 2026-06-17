@@ -21,7 +21,10 @@ from .database import (
     TEMPLATE_IMPORT_CONFLICT_OVERWRITE, TEMPLATE_IMPORT_CONFLICT_RENAME,
     TEMPLATE_IMPORT_CONFLICT_SKIP,
 )
-from .templates import TemplateError, TemplateImportError, TemplateManager
+from .templates import (
+    TemplateError, TemplateImportError, TemplateManager,
+    TemplateVersionError,
+)
 
 
 class CliContext:
@@ -390,11 +393,12 @@ def cmd_batch_cleanup(ctx: CliContext, days: int | None, yes: bool) -> None:
               default=None, help="版本冲突处理策略（skip/abort/force）")
 @click.option("--overwrite", is_flag=True, default=False,
               help="覆盖同名模板")
+@click.option("-H", "--operator", default="", help="操作人（用于版本历史记录）")
 @pass_ctx
 def cmd_template_save(ctx: CliContext, name: str, description: str,
                       event_ids, device_ids, statuses,
                       time_from, time_to, new_status, set_handler, set_note,
-                      conflict_strategy, overwrite: bool) -> None:
+                      conflict_strategy, overwrite: bool, operator: str) -> None:
     """保存批量任务模板"""
     batch_filter = BatchFilter(
         event_ids=event_ids,
@@ -421,6 +425,7 @@ def cmd_template_save(ctx: CliContext, name: str, description: str,
             batch_update=batch_update,
             conflict_strategy=conflict_strategy,
             overwrite=overwrite,
+            operator=operator,
         )
         click.echo(f"模板 '{template.name}' 保存成功！")
         click.echo()
@@ -459,15 +464,17 @@ def cmd_template_show(ctx: CliContext, name: str) -> None:
 @click.argument("source_name")
 @click.argument("target_name")
 @click.option("-d", "--description", default=None, help="新模板描述（默认：源描述 + 副本）")
+@click.option("-H", "--operator", default="", help="操作人（用于版本历史记录）")
 @pass_ctx
 def cmd_template_copy(ctx: CliContext, source_name: str, target_name: str,
-                      description: str | None) -> None:
+                      description: str | None, operator: str) -> None:
     """复制模板"""
     try:
         new_tpl = ctx.template_manager.copy_template(
             source_name=source_name,
             target_name=target_name,
             new_description=description,
+            operator=operator,
         )
         click.echo(f"已复制模板: '{source_name}' → '{target_name}'")
         click.echo()
@@ -477,12 +484,13 @@ def cmd_template_copy(ctx: CliContext, source_name: str, target_name: str,
         sys.exit(1)
 
 
-@main.command("template-delete", help="删除指定的批量任务模板")
+@main.command("template-delete", help="删除指定的批量任务模板（版本历史保留，可用于恢复）")
 @click.argument("name")
 @click.option("--yes", "-y", is_flag=True, default=False,
               help="跳过确认直接删除")
+@click.option("-H", "--operator", default="", help="操作人（用于版本历史记录）")
 @pass_ctx
-def cmd_template_delete(ctx: CliContext, name: str, yes: bool) -> None:
+def cmd_template_delete(ctx: CliContext, name: str, yes: bool, operator: str) -> None:
     """删除模板"""
     try:
         template = ctx.template_manager.get_template(name)
@@ -492,13 +500,14 @@ def cmd_template_delete(ctx: CliContext, name: str, yes: bool) -> None:
 
         if not yes:
             click.echo(f"将删除模板 '{name}'。")
-            if not click.confirm("确认删除？此操作不可恢复！", default=False):
+            click.echo("提示：删除前会自动创建备份快照，版本历史将保留，可用于后续恢复。")
+            if not click.confirm("确认删除？", default=False):
                 click.echo("已取消。")
                 return
 
-        deleted = ctx.template_manager.delete_template(name)
+        deleted = ctx.template_manager.delete_template(name, operator=operator)
         if deleted:
-            click.echo(f"模板 '{name}' 已删除。")
+            click.echo(f"模板 '{name}' 已删除。版本历史已保留，可使用历史版本恢复。")
         else:
             click.echo(f"模板 '{name}' 删除失败。")
             sys.exit(1)
@@ -576,6 +585,88 @@ def cmd_template_import_logs(ctx: CliContext, limit: int) -> None:
 def cmd_template_import_detail(ctx: CliContext, log_id: str) -> None:
     """查看模板导入/导出详情"""
     click.echo(ctx.template_manager.get_template_import_log_detail(log_id))
+
+
+@main.command("template-versions", help="查看模板的版本历史列表")
+@click.argument("name")
+@pass_ctx
+def cmd_template_versions(ctx: CliContext, name: str) -> None:
+    """查看模板版本历史"""
+    try:
+        versions = ctx.template_manager.list_template_versions(name)
+        click.echo(ctx.template_manager.format_template_versions(versions))
+    except (TemplateError, TemplateVersionError) as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("template-diff", help="对比模板两个版本的字段差异摘要")
+@click.argument("name")
+@click.option("--from", "from_version", type=int, required=True,
+              help="起始版本号")
+@click.option("--to", "to_version", type=int, default=None,
+              help="目标版本号（默认：当前最新版本）")
+@pass_ctx
+def cmd_template_diff(ctx: CliContext, name: str, from_version: int,
+                      to_version: int | None) -> None:
+    """对比模板版本差异"""
+    try:
+        if to_version is None:
+            diff = ctx.template_manager.diff_template_version_with_current(
+                name, from_version
+            )
+        else:
+            diff = ctx.template_manager.diff_template_versions(
+                name, from_version, to_version
+            )
+        click.echo(diff.formatted())
+    except (TemplateError, TemplateVersionError) as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("template-rollback", help="将模板回滚到指定历史版本")
+@click.argument("name")
+@click.argument("version", type=int)
+@click.option("-H", "--operator", default="", help="操作人（用于版本历史记录）")
+@click.option("--no-validate", is_flag=True, default=False,
+              help="跳过兼容性检查（不推荐）")
+@click.option("--yes", "-y", is_flag=True, default=False,
+              help="跳过确认直接执行回滚")
+@pass_ctx
+def cmd_template_rollback(ctx: CliContext, name: str, version: int,
+                   operator: str, no_validate: bool, yes: bool) -> None:
+    """回滚模板到指定版本"""
+    try:
+        if not no_validate:
+            try:
+                preview = ctx.template_manager.preview_rollback(name, version)
+                click.echo(preview.formatted())
+                click.echo()
+            except TemplateVersionError as e:
+                click.echo(f"错误: {e}", err=True)
+                sys.exit(1)
+
+            if not yes:
+                if preview.affected_filters or preview.affected_updates:
+                    click.echo("回滚不会更改上述筛选条件和/或更新字段。")
+                click.echo("请仔细检查以上变更内容。")
+                if not click.confirm("确认执行回滚？", default=False):
+                    click.echo("已取消回滚。")
+                    return
+
+        result = ctx.template_manager.rollback_template(
+            name=name,
+            target_version=version,
+            operator=operator,
+            validate_compatibility=not no_validate,
+        )
+        click.echo(result.formatted())
+        if not result.success:
+            sys.exit(1)
+    except (TemplateError, TemplateVersionError) as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
 
 
 @main.command("batch-annotate", help="批量标注事件状态（支持筛选、模板、预览、版本冲突检测）")

@@ -158,6 +158,62 @@ VALID_TEMPLATE_IMPORT_CONFLICT_STRATEGIES = {
 }
 
 
+TEMPLATE_VERSION_OP_CREATE = "create"
+TEMPLATE_VERSION_OP_UPDATE = "update"
+TEMPLATE_VERSION_OP_OVERWRITE = "overwrite"
+TEMPLATE_VERSION_OP_IMPORT = "import"
+TEMPLATE_VERSION_OP_DELETE_BACKUP = "delete_backup"
+TEMPLATE_VERSION_OP_ROLLBACK = "rollback"
+VALID_TEMPLATE_VERSION_OPERATIONS = {
+    TEMPLATE_VERSION_OP_CREATE,
+    TEMPLATE_VERSION_OP_UPDATE,
+    TEMPLATE_VERSION_OP_OVERWRITE,
+    TEMPLATE_VERSION_OP_IMPORT,
+    TEMPLATE_VERSION_OP_DELETE_BACKUP,
+    TEMPLATE_VERSION_OP_ROLLBACK,
+}
+
+
+@dataclass
+class TemplateVersion:
+    """模板版本快照"""
+    id: str
+    template_id: str
+    template_name: str
+    version: int
+    description: str
+    filters: str
+    updates: str
+    conflict_strategy: str
+    operation_type: str
+    operator: str
+    source_file: str
+    parent_version: int
+    branch_tag: str
+    snapshot_at: str
+    change_summary: str
+
+    def to_dict(self) -> dict[str, Any]:
+        import json
+        return {
+            "id": self.id,
+            "template_id": self.template_id,
+            "template_name": self.template_name,
+            "version": self.version,
+            "description": self.description,
+            "filters": json.loads(self.filters),
+            "updates": json.loads(self.updates),
+            "conflict_strategy": self.conflict_strategy,
+            "operation_type": self.operation_type,
+            "operator": self.operator,
+            "source_file": self.source_file,
+            "parent_version": self.parent_version,
+            "branch_tag": self.branch_tag,
+            "snapshot_at": self.snapshot_at,
+            "change_summary": self.change_summary,
+        }
+
+
 @dataclass
 class BatchTemplate:
     """批量任务模板"""
@@ -409,6 +465,33 @@ class Database:
 
                 CREATE INDEX IF NOT EXISTS idx_tpl_import_items_log
                     ON template_import_items(import_log_id);
+
+                CREATE TABLE IF NOT EXISTS template_versions (
+                    id TEXT PRIMARY KEY,
+                    template_id TEXT NOT NULL,
+                    template_name TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    description TEXT DEFAULT '',
+                    filters TEXT NOT NULL,
+                    updates TEXT NOT NULL,
+                    conflict_strategy TEXT NOT NULL,
+                    operation_type TEXT NOT NULL,
+                    operator TEXT DEFAULT '',
+                    source_file TEXT DEFAULT '',
+                    parent_version INTEGER DEFAULT 0,
+                    branch_tag TEXT DEFAULT '',
+                    snapshot_at TEXT NOT NULL,
+                    change_summary TEXT DEFAULT ''
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_tpl_versions_tpl_id
+                    ON template_versions(template_id);
+                CREATE INDEX IF NOT EXISTS idx_tpl_versions_name
+                    ON template_versions(template_name);
+                CREATE INDEX IF NOT EXISTS idx_tpl_versions_snapshot
+                    ON template_versions(snapshot_at);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_tpl_versions_unique
+                    ON template_versions(template_id, version);
             """)
 
     # ============ SourceRecord 操作 ============
@@ -912,5 +995,89 @@ class Database:
             cur = conn.execute(
                 f"DELETE FROM batch_templates WHERE name IN ({placeholders})",
                 names
+            )
+            return cur.rowcount
+
+    # ============ TemplateVersion 操作 ============
+
+    def get_next_template_version(self, template_id: str) -> int:
+        """获取指定模板的下一个版本号"""
+        with self._conn() as conn:
+            cur = conn.execute(
+                "SELECT COALESCE(MAX(version), 0) FROM template_versions WHERE template_id = ?",
+                (template_id,)
+            )
+            return cur.fetchone()[0] + 1
+
+    def insert_template_version(self, template_id: str, template_name: str,
+                                version: int, description: str,
+                                filters: str, updates: str, conflict_strategy: str,
+                                operation_type: str, operator: str = "",
+                                source_file: str = "", parent_version: int = 0,
+                                branch_tag: str = "", change_summary: str = "") -> str:
+        """插入模板版本快照，返回版本记录ID"""
+        version_id = "TPL-VER-" + uuid.uuid4().hex[:12].upper()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO template_versions
+                   (id, template_id, template_name, version, description,
+                    filters, updates, conflict_strategy, operation_type,
+                    operator, source_file, parent_version, branch_tag,
+                    snapshot_at, change_summary)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (version_id, template_id, template_name, version, description,
+                 filters, updates, conflict_strategy, operation_type,
+                 operator, source_file, parent_version, branch_tag,
+                 now, change_summary)
+            )
+        return version_id
+
+    def get_template_version(self, version_id: str) -> Optional[TemplateVersion]:
+        """按ID获取模板版本"""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM template_versions WHERE id = ?",
+                (version_id,)
+            ).fetchone()
+            if not row:
+                return None
+            return TemplateVersion(**dict(row))
+
+    def get_template_version_by_number(self, template_id: str, version: int) -> Optional[TemplateVersion]:
+        """按模板ID和版本号获取模板版本"""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM template_versions WHERE template_id = ? AND version = ?",
+                (template_id, version)
+            ).fetchone()
+            if not row:
+                return None
+            return TemplateVersion(**dict(row))
+
+    def get_template_versions(self, template_id: str) -> list[TemplateVersion]:
+        """获取指定模板的所有版本，按版本号降序"""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM template_versions WHERE template_id = ? ORDER BY version DESC",
+                (template_id,)
+            ).fetchall()
+            return [TemplateVersion(**dict(r)) for r in rows]
+
+    def get_template_versions_by_name(self, template_name: str) -> list[TemplateVersion]:
+        """按模板名称获取所有版本（可能包含同名模板分叉），按快照时间降序"""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM template_versions WHERE template_name = ? ORDER BY snapshot_at DESC",
+                (template_name,)
+            ).fetchall()
+            return [TemplateVersion(**dict(r)) for r in rows]
+
+    def delete_template_versions(self, template_id: str) -> int:
+        """删除指定模板的所有版本记录，返回删除数量"""
+        with self._conn() as conn:
+            cur = conn.execute(
+                "DELETE FROM template_versions WHERE template_id = ?",
+                (template_id,)
             )
             return cur.rowcount
