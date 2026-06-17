@@ -1,0 +1,46 @@
+{
+  "version": "1.0",
+  "export_time": "2026-06-17 12:31:34",
+  "schedule_count": 1,
+  "schedules": [
+    {
+      "team_id": "TEAM-5A09FDDBFF71",
+      "team_name": "Alpha",
+      "member_name": "leader1",
+      "member_role": "leader",
+      "schedule_date": "2026-06-17",
+      "shift_type": "day",
+      "start_time": "09:00",
+      "end_time": "18:00",
+      "escalation_level": 1,
+      "note": "day shift reviewer",
+      "schedule_id": "SCHED-679AA366DEC5",
+      "created_at": "2026-06-17 12:30:18",
+      "updated_at": "2026-06-17 12:30:43",
+      "id": "SCHED-679AA366DEC5"
+    }
+  ],
+  "teams": [
+    {
+      "team_id": "TEAM-5A09FDDBFF71",
+      "name": "Alpha",
+      "description": "review team",
+      "created_at": "2026-06-17 12:29:30",
+      "updated_at": "2026-06-17 12:29:30"
+    }
+  ],
+  "team_count": 1,
+  "members": [
+    {
+      "member_id": "MEM-9E18B5E1F008",
+      "team_id": "TEAM-5A09FDDBFF71",
+      "name": "leader1",
+      "role": "leader",
+      "phone": "13800000001",
+      "email": "leader1@example.com",
+      "created_at": "2026-06-17 12:30:01",
+      "updated_at": "2026-06-17 12:30:01"
+    }
+  ],
+  "member_count": 1
+}

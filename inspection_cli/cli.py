@@ -33,6 +33,21 @@ from .database import (
     TICKET_IMPORT_CONFLICT_FORCE, VALID_TICKET_IMPORT_CONFLICT_STRATEGIES,
     DEFAULT_TICKET_PRIORITIES,
 )
+from .duty import (
+    DutyManager, DutyError, DutyConflictError, DutyPermissionError,
+)
+from .duty_escalation import DutyEscalationEngine
+from .duty_handover import DutyHandoverManager
+from .duty_io import (
+    DutyIOManager,
+    DUTY_IMPORT_CONFLICT_SKIP, DUTY_IMPORT_CONFLICT_ABORT,
+    DUTY_IMPORT_CONFLICT_FORCE, VALID_DUTY_IMPORT_CONFLICT_STRATEGIES,
+)
+from .database import (
+    VALID_DUTY_ROLES, VALID_DUTY_SHIFTS,
+    DUTY_ESCALATION_STATUS_PENDING, DUTY_ESCALATION_STATUS_ESCALATED,
+    DUTY_ESCALATION_STATUS_RESOLVED, DUTY_ESCALATION_STATUS_CLOSED,
+)
 
 
 class CliContext:
@@ -55,6 +70,10 @@ class CliContext:
         self.template_manager = TemplateManager(self.db, self.config)
         self.ticket_manager = TicketManager(self.db, self.config)
         self.ticket_io_manager = TicketIOManager(self.db, self.config, self.ticket_manager)
+        self.duty_manager = DutyManager(self.db, self.config)
+        self.duty_escalation_engine = DutyEscalationEngine(self.db, self.config, self.duty_manager)
+        self.duty_handover_manager = DutyHandoverManager(self.db, self.config, self.duty_manager)
+        self.duty_io_manager = DutyIOManager(self.db, self.config, self.duty_manager)
 
 
 pass_ctx = click.make_pass_decorator(CliContext)
@@ -1075,6 +1094,645 @@ def cmd_ticket_priorities(ctx: CliContext) -> None:
 def cmd_ticket_assignable(ctx: CliContext) -> None:
     """列出可分配人员"""
     click.echo(ctx.ticket_manager.list_assignable_users())
+
+
+# ============ 值班排班相关命令 ============
+
+@main.command("duty-team-create", help="创建值班班组")
+@click.option("-n", "--name", required=True, help="班组名称")
+@click.option("-d", "--description", default="", help="班组描述")
+@pass_ctx
+def cmd_duty_team_create(ctx: CliContext, name: str, description: str) -> None:
+    """创建班组"""
+    try:
+        result = ctx.duty_manager.create_team(name=name, description=description)
+        click.echo(result.formatted())
+    except DutyConflictError as e:
+        click.echo(f"冲突: {e}", err=True)
+        sys.exit(1)
+    except DutyError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("duty-team-update", help="更新值班班组信息")
+@click.argument("team_id")
+@click.option("-n", "--name", default=None, help="新班组名称")
+@click.option("-d", "--description", default=None, help="新班组描述")
+@pass_ctx
+def cmd_duty_team_update(ctx: CliContext, team_id: str, name: str | None,
+                         description: str | None) -> None:
+    """更新班组"""
+    try:
+        result = ctx.duty_manager.update_team(
+            team_id=team_id,
+            name=name,
+            description=description,
+        )
+        click.echo(result.formatted())
+    except DutyConflictError as e:
+        click.echo(f"冲突: {e}", err=True)
+        sys.exit(1)
+    except DutyError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("duty-team-list", help="列出所有值班班组")
+@pass_ctx
+def cmd_duty_team_list(ctx: CliContext) -> None:
+    """列出班组"""
+    click.echo(ctx.duty_manager.list_teams_formatted())
+
+
+@main.command("duty-member-add", help="添加值班人员到班组")
+@click.option("--team-id", required=True, help="班组ID")
+@click.option("-n", "--name", required=True, help="人员姓名")
+@click.option("-r", "--role", required=True,
+              type=click.Choice(list(VALID_DUTY_ROLES), case_sensitive=False),
+              help="角色")
+@click.option("-p", "--phone", default="", help="联系电话")
+@click.option("-e", "--email", default="", help="联系邮箱")
+@pass_ctx
+def cmd_duty_member_add(ctx: CliContext, team_id: str, name: str, role: str,
+                        phone: str, email: str) -> None:
+    """添加人员"""
+    try:
+        result = ctx.duty_manager.add_member(
+            team_id=team_id,
+            name=name,
+            role=role.lower(),
+            phone=phone,
+            email=email,
+        )
+        click.echo(result.formatted())
+    except DutyConflictError as e:
+        click.echo(f"冲突: {e}", err=True)
+        sys.exit(1)
+    except DutyError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("duty-member-update", help="更新值班人员信息")
+@click.argument("member_id")
+@click.option("--team-id", default=None, help="新班组ID")
+@click.option("-n", "--name", default=None, help="新姓名")
+@click.option("-r", "--role", default=None,
+              type=click.Choice(list(VALID_DUTY_ROLES), case_sensitive=False),
+              help="新角色")
+@click.option("-p", "--phone", default=None, help="新联系电话")
+@click.option("-e", "--email", default=None, help="新联系邮箱")
+@pass_ctx
+def cmd_duty_member_update(ctx: CliContext, member_id: str, team_id: str | None,
+                           name: str | None, role: str | None,
+                           phone: str | None, email: str | None) -> None:
+    """更新人员"""
+    try:
+        result = ctx.duty_manager.update_member(
+            member_id=member_id,
+            team_id=team_id,
+            name=name,
+            role=role.lower() if role else None,
+            phone=phone,
+            email=email,
+        )
+        click.echo(result.formatted())
+    except DutyConflictError as e:
+        click.echo(f"冲突: {e}", err=True)
+        sys.exit(1)
+    except DutyError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("duty-member-list", help="列出班组的所有值班人员")
+@click.option("--team-id", required=True, help="班组ID")
+@pass_ctx
+def cmd_duty_member_list(ctx: CliContext, team_id: str) -> None:
+    """列出人员"""
+    try:
+        click.echo(ctx.duty_manager.list_members_formatted(team_id))
+    except DutyError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("duty-schedule-set", help="新增或修改值班排班（支持自动冲突检测）")
+@click.option("--team-id", required=True, help="班组ID")
+@click.option("-m", "--member", "member_name", required=True, help="值班人姓名")
+@click.option("-d", "--date", "schedule_date", required=True,
+              help="排班日期 (YYYY-MM-DD)")
+@click.option("-s", "--shift", "shift_type", required=True,
+              type=click.Choice(list(VALID_DUTY_SHIFTS), case_sensitive=False),
+              help="班次类型")
+@click.option("--start-time", default=None, help="开始时间 (HH:MM)，custom班次必填")
+@click.option("--end-time", default=None, help="结束时间 (HH:MM)，custom班次必填")
+@click.option("-l", "--level", "escalation_level", type=int, default=1,
+              help="升级层级，默认1")
+@click.option("-n", "--note", default="", help="备注")
+@click.option("--overwrite", is_flag=True, default=False,
+              help="覆盖已有冲突排班")
+@pass_ctx
+def cmd_duty_schedule_set(ctx: CliContext, team_id: str, member_name: str,
+                          schedule_date: str, shift_type: str,
+                          start_time: str | None, end_time: str | None,
+                          escalation_level: int, note: str,
+                          overwrite: bool) -> None:
+    """设置排班"""
+    try:
+        result = ctx.duty_manager.add_or_update_schedule(
+            team_id=team_id,
+            member_name=member_name,
+            schedule_date=schedule_date,
+            shift_type=shift_type.lower(),
+            start_time=start_time,
+            end_time=end_time,
+            escalation_level=escalation_level,
+            note=note,
+            overwrite=overwrite,
+        )
+        click.echo(result.formatted())
+    except DutyConflictError as e:
+        click.echo(f"冲突: {e}", err=True)
+        click.echo("提示: 使用 --overwrite 覆盖冲突排班。", err=True)
+        sys.exit(1)
+    except DutyError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("duty-schedule-today", help="查询当天值班安排（显示当前在值人员）")
+@click.option("--team-id", required=True, help="班组ID")
+@pass_ctx
+def cmd_duty_schedule_today(ctx: CliContext, team_id: str) -> None:
+    """查询当天值班"""
+    try:
+        result = ctx.duty_manager.get_today_schedule(team_id)
+        click.echo(result.formatted())
+    except DutyError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("duty-schedule-list", help="列出排班记录（支持按日期范围筛选）")
+@click.option("--team-id", required=True, help="班组ID")
+@click.option("--from", "date_from", default=None, help="开始日期 (YYYY-MM-DD)")
+@click.option("--to", "date_to", default=None, help="结束日期 (YYYY-MM-DD)")
+@pass_ctx
+def cmd_duty_schedule_list(ctx: CliContext, team_id: str,
+                           date_from: str | None, date_to: str | None) -> None:
+    """列出排班"""
+    try:
+        click.echo(ctx.duty_manager.list_schedules_formatted(
+            team_id, date_from, date_to
+        ))
+    except DutyError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("duty-schedule-delete", help="删除指定排班记录")
+@click.argument("schedule_id")
+@click.option("--yes", "-y", is_flag=True, default=False,
+              help="跳过确认直接删除")
+@pass_ctx
+def cmd_duty_schedule_delete(ctx: CliContext, schedule_id: str, yes: bool) -> None:
+    """删除排班"""
+    try:
+        schedule = ctx.duty_manager.get_schedule(schedule_id)
+        if not yes:
+            click.echo(f"将删除排班: {schedule.schedule_date} "
+                       f"{schedule.start_time}-{schedule.end_time}")
+            if not click.confirm("确认删除？", default=False):
+                click.echo("已取消。")
+                return
+
+        ctx.duty_manager.delete_schedule(schedule_id)
+        click.echo(f"排班 {schedule_id} 已删除。")
+    except DutyError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("duty-levels-set", help="设置班组的升级层级配置")
+@click.option("--team-id", required=True, help="班组ID")
+@click.option("--level", "levels", multiple=True,
+              help="升级层级配置，格式: '层级号:名称:响应分钟:升级分钟' "
+                   "(例如: '1:L1一线:30:60' '2:L2主管:15:30')")
+@pass_ctx
+def cmd_duty_levels_set(ctx: CliContext, team_id: str, levels: tuple[str, ...]) -> None:
+    """设置升级层级"""
+    try:
+        level_list: list[dict[str, Any]] = []
+        for level_str in levels:
+            parts = level_str.split(":")
+            if len(parts) < 2:
+                raise DutyError(
+                    f"层级配置格式错误: {level_str}，"
+                    f"应为 '层级号:名称[:响应分钟[:升级分钟]]'"
+                )
+            level_dict = {
+                "level": int(parts[0]),
+                "name": parts[1],
+                "response_minutes": int(parts[2]) if len(parts) > 2 else 30,
+                "escalation_minutes": int(parts[3]) if len(parts) > 3 else 60,
+            }
+            level_list.append(level_dict)
+
+        if not level_list:
+            raise DutyError("至少指定一个升级层级")
+
+        result = ctx.duty_manager.set_escalation_levels(team_id, level_list)
+        click.echo(f"已设置 {len(result)} 个升级层级:")
+        for lvl in result:
+            click.echo(f"  L{lvl.level}: {lvl.name} "
+                       f"(响应:{lvl.response_minutes}分钟, "
+                       f"升级:{lvl.escalation_minutes}分钟)")
+    except DutyError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("duty-levels-list", help="查看班组的升级层级配置")
+@click.option("--team-id", required=True, help="班组ID")
+@pass_ctx
+def cmd_duty_levels_list(ctx: CliContext, team_id: str) -> None:
+    """查看升级层级"""
+    try:
+        levels = ctx.duty_manager.get_escalation_levels(team_id)
+        if not levels:
+            click.echo("暂无升级层级配置。")
+            return
+
+        click.echo(f"班组 {team_id} 升级层级配置:")
+        for lvl in levels:
+            click.echo(f"  L{lvl.level}: {lvl.name} "
+                       f"(响应:{lvl.response_minutes}分钟, "
+                       f"升级:{lvl.escalation_minutes}分钟)")
+    except DutyError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("duty-windows-set", help="设置班组的时间窗口配置")
+@click.option("--team-id", required=True, help="班组ID")
+@click.option("--window", "windows", multiple=True,
+              help="时间窗口配置，格式: '名称:开始时间:结束时间[:周几逗号分隔[:优先级]]' "
+                   "(例如: '工作时间:09:00:18:00:0,1,2,3,4:1' '非工作时间:18:00:09:00:0,1,2,3,4,5,6:2')")
+@pass_ctx
+def cmd_duty_windows_set(ctx: CliContext, team_id: str,
+                         windows: tuple[str, ...]) -> None:
+    """设置时间窗口"""
+    try:
+        window_list: list[dict[str, Any]] = []
+        for window_str in windows:
+            parts = window_str.split(":")
+            if len(parts) < 3:
+                raise DutyError(
+                    f"时间窗口配置格式错误: {window_str}，"
+                    f"应为 '名称:开始时间:结束时间[:周几逗号分隔[:优先级]]'"
+                )
+            window_dict = {
+                "name": parts[0],
+                "start_time": parts[1],
+                "end_time": parts[2],
+                "days_of_week": parts[3] if len(parts) > 3 else "",
+                "priority": int(parts[4]) if len(parts) > 4 else 1,
+            }
+            window_list.append(window_dict)
+
+        if not window_list:
+            raise DutyError("至少指定一个时间窗口")
+
+        result = ctx.duty_manager.set_time_windows(team_id, window_list)
+        click.echo(f"已设置 {len(result)} 个时间窗口:")
+        for w in result:
+            days = f" (周{w.days_of_week})" if w.days_of_week else " (每天)"
+            click.echo(f"  {w.name}: {w.start_time}-{w.end_time}{days} "
+                       f"优先级:{w.priority}")
+    except DutyError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("duty-windows-list", help="查看班组的时间窗口配置")
+@click.option("--team-id", required=True, help="班组ID")
+@pass_ctx
+def cmd_duty_windows_list(ctx: CliContext, team_id: str) -> None:
+    """查看时间窗口"""
+    try:
+        windows = ctx.duty_manager.get_time_windows(team_id)
+        if not windows:
+            click.echo("暂无时间窗口配置。")
+            return
+
+        click.echo(f"班组 {team_id} 时间窗口配置:")
+        for w in windows:
+            days = f" (周{w.days_of_week})" if w.days_of_week else " (每天)"
+            click.echo(f"  {w.name}: {w.start_time}-{w.end_time}{days} "
+                       f"优先级:{w.priority}")
+    except DutyError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("duty-handover", help="手动交班（将当前值班权交接给另一人）")
+@click.option("--team-id", required=True, help="班组ID")
+@click.option("-H", "--operator", required=True, help="操作人姓名（需有交班权限）")
+@click.option("-t", "--to", "to_member_name", required=True, help="接班人姓名")
+@click.option("-n", "--note", default="", help="交接备注")
+@pass_ctx
+def cmd_duty_handover(ctx: CliContext, team_id: str, operator: str,
+                      to_member_name: str, note: str) -> None:
+    """手动交班"""
+    try:
+        result = ctx.duty_handover_manager.perform_handover(
+            team_id=team_id,
+            operator_member_name=operator,
+            to_member_name=to_member_name,
+            note=note,
+        )
+        click.echo(result.formatted())
+    except DutyPermissionError as e:
+        click.echo(f"权限错误: {e}", err=True)
+        sys.exit(1)
+    except DutyConflictError as e:
+        click.echo(f"冲突: {e}", err=True)
+        sys.exit(1)
+    except DutyError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("duty-handover-undo", help="撤销最近一次交班（限回滚窗口内）")
+@click.option("--team-id", required=True, help="班组ID")
+@click.option("-H", "--operator", required=True, help="操作人姓名（需有交班权限）")
+@click.option("--yes", "-y", is_flag=True, default=False,
+              help="跳过确认直接撤销")
+@pass_ctx
+def cmd_duty_handover_undo(ctx: CliContext, team_id: str, operator: str,
+                           yes: bool) -> None:
+    """撤销交班"""
+    try:
+        last = ctx.db.get_last_duty_handover(team_id)
+        if last and not yes:
+            from_member = ctx.db.get_duty_member(last.from_member_id)
+            to_member = ctx.db.get_duty_member(last.to_member_id)
+            from_name = from_member.name if from_member else last.from_member_id
+            to_name = to_member.name if to_member else last.to_member_id
+
+            click.echo(f"将撤销最近一次交班:")
+            click.echo(f"  时间: {last.handed_at}")
+            click.echo(f"  {from_name} -> {to_name}")
+            if last.note:
+                click.echo(f"  备注: {last.note}")
+
+            if not click.confirm("确认撤销此交班？", default=False):
+                click.echo("已取消。")
+                return
+
+        result = ctx.duty_handover_manager.undo_last_handover(
+            team_id=team_id,
+            operator_member_name=operator,
+        )
+        click.echo(result.formatted())
+    except DutyPermissionError as e:
+        click.echo(f"权限错误: {e}", err=True)
+        sys.exit(1)
+    except DutyConflictError as e:
+        click.echo(f"冲突: {e}", err=True)
+        sys.exit(1)
+    except DutyError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("duty-handover-history", help="查看交接班历史记录")
+@click.option("--team-id", required=True, help="班组ID")
+@click.option("--from", "date_from", default=None, help="开始日期 (YYYY-MM-DD)")
+@click.option("--to", "date_to", default=None, help="结束日期 (YYYY-MM-DD)")
+@click.option("-n", "--limit", type=int, default=50, help="显示数量")
+@pass_ctx
+def cmd_duty_handover_history(ctx: CliContext, team_id: str,
+                              date_from: str | None, date_to: str | None,
+                              limit: int) -> None:
+    """查看交接历史"""
+    try:
+        click.echo(ctx.duty_handover_manager.list_handover_history_formatted(
+            team_id, date_from, date_to, limit
+        ))
+    except DutyError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("duty-escalation-match", help="匹配事件到当前责任人（生成升级命中日志）")
+@click.option("--team-id", required=True, help="班组ID")
+@click.option("--event-id", required=True, help="事件ID")
+@click.option("--title", "event_title", required=True, help="事件标题")
+@click.option("--event-time", default=None, help="事件发生时间 (YYYY-MM-DD HH:MM:SS)")
+@click.option("-l", "--min-level", type=int, default=1, help="最小升级层级")
+@click.option("-n", "--note", default="", help="交接备注")
+@pass_ctx
+def cmd_duty_escalation_match(ctx: CliContext, team_id: str, event_id: str,
+                              event_title: str, event_time: str | None,
+                              min_level: int, note: str) -> None:
+    """匹配事件责任人"""
+    result = ctx.duty_escalation_engine.match_event(
+        team_id=team_id,
+        event_id=event_id,
+        event_title=event_title,
+        event_time=event_time,
+        min_level=min_level,
+        handover_note=note,
+    )
+    click.echo(result.formatted())
+    if not result.success:
+        sys.exit(1)
+
+
+@main.command("duty-escalation-log-show", help="查看单条升级命中日志详情")
+@click.argument("log_id")
+@pass_ctx
+def cmd_duty_escalation_log_show(ctx: CliContext, log_id: str) -> None:
+    """查看升级日志详情"""
+    try:
+        result = ctx.duty_escalation_engine.get_escalation_log(log_id)
+        click.echo(result.formatted())
+    except DutyError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("duty-escalation-log-list", help="按筛选条件列出升级命中日志")
+@click.option("--team-id", default=None, help="班组ID（可选）")
+@click.option("--status", default=None,
+              type=click.Choice([
+                  DUTY_ESCALATION_STATUS_PENDING,
+                  DUTY_ESCALATION_STATUS_ESCALATED,
+                  DUTY_ESCALATION_STATUS_RESOLVED,
+                  DUTY_ESCALATION_STATUS_CLOSED,
+              ], case_sensitive=False),
+              help="状态（可选）")
+@click.option("--from", "date_from", default=None, help="开始日期 (YYYY-MM-DD)")
+@click.option("--to", "date_to", default=None, help="结束日期 (YYYY-MM-DD)")
+@click.option("-n", "--limit", type=int, default=50, help="显示数量")
+@pass_ctx
+def cmd_duty_escalation_log_list(ctx: CliContext, team_id: str | None,
+                                 status: str | None, date_from: str | None,
+                                 date_to: str | None, limit: int) -> None:
+    """列出升级日志"""
+    click.echo(ctx.duty_escalation_engine.list_escalation_logs_formatted(
+        team_id=team_id,
+        status=status.lower() if status else None,
+        date_from=date_from,
+        date_to=date_to,
+        limit=limit,
+    ))
+
+
+@main.command("duty-escalation-ack", help="确认升级命中日志")
+@click.argument("log_id")
+@click.option("-H", "--operator", required=True, help="操作人")
+@pass_ctx
+def cmd_duty_escalation_ack(ctx: CliContext, log_id: str, operator: str) -> None:
+    """确认升级日志"""
+    try:
+        ctx.duty_escalation_engine.acknowledge_log(log_id, operator)
+        click.echo(f"升级日志 {log_id} 已确认。")
+    except DutyError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("duty-escalation-resolve", help="标记升级命中日志为已解决")
+@click.argument("log_id")
+@click.option("-H", "--operator", required=True, help="操作人")
+@click.option("-n", "--note", default="", help="解决备注")
+@pass_ctx
+def cmd_duty_escalation_resolve(ctx: CliContext, log_id: str, operator: str,
+                                note: str) -> None:
+    """解决升级日志"""
+    try:
+        ctx.duty_escalation_engine.resolve_log(log_id, operator, note)
+        click.echo(f"升级日志 {log_id} 已标记为解决。")
+    except DutyError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("duty-schedule-export", help="导出排班列表（CSV/JSON）")
+@click.argument("output_path", type=click.Path(dir_okay=False))
+@click.option("--team-id", default=None, help="班组ID（默认全部）")
+@click.option("--from", "date_from", default=None, help="开始日期 (YYYY-MM-DD)")
+@click.option("--to", "date_to", default=None, help="结束日期 (YYYY-MM-DD)")
+@click.option("-f", "--format", "fmt",
+              type=click.Choice(["csv", "json"], case_sensitive=False),
+              default=None, help="导出格式（默认按文件后缀推断）")
+@click.option("--no-members", is_flag=True, default=False,
+              help="JSON 导出时不包含人员信息")
+@click.option("--no-teams", is_flag=True, default=False,
+              help="JSON 导出时不包含班组信息")
+@pass_ctx
+def cmd_duty_schedule_export(ctx: CliContext, output_path: str, team_id: str | None,
+                             date_from: str | None, date_to: str | None,
+                             fmt: str | None, no_members: bool, no_teams: bool) -> None:
+    """导出排班"""
+    if fmt:
+        fmt = fmt.lower()
+    try:
+        result = ctx.duty_io_manager.export_schedules(
+            output_path=output_path,
+            team_id=team_id,
+            date_from=date_from,
+            date_to=date_to,
+            fmt=fmt,
+            include_members=not no_members,
+            include_teams=not no_teams,
+        )
+        click.echo(result.formatted())
+    except DutyError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("duty-schedule-import", help="从文件导入排班（CSV/JSON）")
+@click.argument("file_path", type=click.Path(exists=True, dir_okay=False))
+@click.option("--conflict-strategy",
+              type=click.Choice(["skip", "abort", "force"], case_sensitive=False),
+              default="skip",
+              help="冲突处理策略：skip（跳过）/ abort（中止）/ force（覆盖），默认 skip")
+@click.option("--auto-create-teams", is_flag=True, default=False,
+              help="自动创建不存在的班组")
+@click.option("--auto-create-members", is_flag=True, default=False,
+              help="自动创建不存在的人员")
+@click.option("-H", "--operator", default="import", help="操作人（用于日志）")
+@pass_ctx
+def cmd_duty_schedule_import(ctx: CliContext, file_path: str,
+                             conflict_strategy: str, auto_create_teams: bool,
+                             auto_create_members: bool, operator: str) -> None:
+    """导入排班"""
+    if conflict_strategy:
+        conflict_strategy = conflict_strategy.lower()
+    try:
+        result = ctx.duty_io_manager.import_schedules(
+            file_path=file_path,
+            conflict_strategy=conflict_strategy,
+            auto_create_teams=auto_create_teams,
+            auto_create_members=auto_create_members,
+            operator=operator,
+        )
+        click.echo(result.formatted())
+
+        if result.items:
+            click.echo()
+            click.echo("详情:")
+            for item in result.items:
+                status_label = {
+                    "success": "成功",
+                    "skipped": "跳过",
+                    "conflict": "冲突",
+                    "error": "错误",
+                }.get(item["status"], item["status"])
+                click.echo(
+                    f"  [{status_label}] 行{item['index']+1}: {item['reason']}"
+                )
+
+        if result.has_errors:
+            sys.exit(1)
+    except DutyError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("duty-roles", help="列出所有可用的值班角色")
+@pass_ctx
+def cmd_duty_roles(ctx: CliContext) -> None:
+    """列出角色"""
+    from .config import DutyConfig
+    role_labels = DutyConfig().role_labels()
+    click.echo("可用值班角色:")
+    for role, label in role_labels.items():
+        click.echo(f"  {role}: {label}")
+
+
+@main.command("duty-shifts", help="列出所有可用的班次类型")
+@pass_ctx
+def cmd_duty_shifts(ctx: CliContext) -> None:
+    """列出班次"""
+    from .config import DutyConfig
+    from .database import DUTY_SHIFT_TIME_RANGES
+
+    shift_labels = DutyConfig().shift_labels()
+    click.echo("可用班次类型:")
+    for shift, label in shift_labels.items():
+        time_range = DUTY_SHIFT_TIME_RANGES.get(shift, "自定义")
+        if isinstance(time_range, tuple):
+            time_str = f"{time_range[0]}-{time_range[1]}"
+        else:
+            time_str = time_range
+        click.echo(f"  {shift}: {label} ({time_str})")
 
 
 if __name__ == "__main__":

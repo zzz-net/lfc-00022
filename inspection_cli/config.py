@@ -83,6 +83,35 @@ class TicketConfig:
 
 
 @dataclass
+class DutyConfig:
+    """值班排班配置"""
+    available_teams: list[str] = field(default_factory=list)
+    max_escalation_levels: int = 3
+    handover_allowed_roles: list[str] = field(default_factory=lambda: ["leader", "manager"])
+    default_rollback_window_hours: int = 24
+    log_retention_days: int = 90
+    valid_roles: list[str] = field(default_factory=lambda: ["leader", "engineer", "operator", "manager"])
+    valid_shifts: list[str] = field(default_factory=lambda: ["morning", "afternoon", "night", "day", "custom"])
+
+    def role_labels(self) -> dict[str, str]:
+        return {
+            "leader": "班组长",
+            "engineer": "工程师",
+            "operator": "操作员",
+            "manager": "经理",
+        }
+
+    def shift_labels(self) -> dict[str, str]:
+        return {
+            "morning": "早班 (08:00-16:00)",
+            "afternoon": "中班 (16:00-00:00)",
+            "night": "夜班 (00:00-08:00)",
+            "day": "日班 (09:00-18:00)",
+            "custom": "自定义",
+        }
+
+
+@dataclass
 class AppConfig:
     """应用配置"""
     validation: ValidationRules = field(default_factory=ValidationRules)
@@ -90,6 +119,7 @@ class AppConfig:
     export: ExportConfig = field(default_factory=ExportConfig)
     batch: BatchConfig = field(default_factory=BatchConfig)
     ticket: TicketConfig = field(default_factory=TicketConfig)
+    duty: DutyConfig = field(default_factory=DutyConfig)
     db_path: str = "inspection.db"
 
     @classmethod
@@ -233,6 +263,51 @@ class AppConfig:
                 if not isinstance(tk["log_retention_days"], int) or tk["log_retention_days"] <= 0:
                     raise ConfigError("ticket.log_retention_days 必须是正整数")
                 cfg.ticket.log_retention_days = tk["log_retention_days"]
+
+        if "duty" in raw:
+            dt = raw["duty"]
+            if not isinstance(dt, dict):
+                raise ConfigError("duty 必须是字典")
+            if "available_teams" in dt:
+                if not isinstance(dt["available_teams"], list):
+                    raise ConfigError("duty.available_teams 必须是列表")
+                if not all(isinstance(t, str) for t in dt["available_teams"]):
+                    raise ConfigError("duty.available_teams 列表元素必须是字符串")
+                cfg.duty.available_teams = dt["available_teams"]
+            if "max_escalation_levels" in dt:
+                if not isinstance(dt["max_escalation_levels"], int) or dt["max_escalation_levels"] <= 0:
+                    raise ConfigError("duty.max_escalation_levels 必须是正整数")
+                cfg.duty.max_escalation_levels = dt["max_escalation_levels"]
+            if "handover_allowed_roles" in dt:
+                if not isinstance(dt["handover_allowed_roles"], list):
+                    raise ConfigError("duty.handover_allowed_roles 必须是列表")
+                if not all(isinstance(r, str) for r in dt["handover_allowed_roles"]):
+                    raise ConfigError("duty.handover_allowed_roles 列表元素必须是字符串")
+                cfg.duty.handover_allowed_roles = dt["handover_allowed_roles"]
+            if "default_rollback_window_hours" in dt:
+                if not isinstance(dt["default_rollback_window_hours"], int) or dt["default_rollback_window_hours"] <= 0:
+                    raise ConfigError("duty.default_rollback_window_hours 必须是正整数")
+                cfg.duty.default_rollback_window_hours = dt["default_rollback_window_hours"]
+            if "log_retention_days" in dt:
+                if not isinstance(dt["log_retention_days"], int) or dt["log_retention_days"] <= 0:
+                    raise ConfigError("duty.log_retention_days 必须是正整数")
+                cfg.duty.log_retention_days = dt["log_retention_days"]
+            if "valid_roles" in dt:
+                if not isinstance(dt["valid_roles"], list):
+                    raise ConfigError("duty.valid_roles 必须是列表")
+                if not all(isinstance(r, str) for r in dt["valid_roles"]):
+                    raise ConfigError("duty.valid_roles 列表元素必须是字符串")
+                if not dt["valid_roles"]:
+                    raise ConfigError("duty.valid_roles 不能为空列表")
+                cfg.duty.valid_roles = dt["valid_roles"]
+            if "valid_shifts" in dt:
+                if not isinstance(dt["valid_shifts"], list):
+                    raise ConfigError("duty.valid_shifts 必须是列表")
+                if not all(isinstance(s, str) for s in dt["valid_shifts"]):
+                    raise ConfigError("duty.valid_shifts 列表元素必须是字符串")
+                if not dt["valid_shifts"]:
+                    raise ConfigError("duty.valid_shifts 不能为空列表")
+                cfg.duty.valid_shifts = dt["valid_shifts"]
 
         if "db_path" in raw:
             if not isinstance(raw["db_path"], str):
