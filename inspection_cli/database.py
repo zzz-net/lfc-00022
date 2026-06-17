@@ -136,6 +136,28 @@ class BatchOperationItem:
     processed_at: str
 
 
+TEMPLATE_IMPORT_LOG_STATUS_SUCCESS = "success"
+TEMPLATE_IMPORT_LOG_STATUS_PARTIAL = "partial"
+TEMPLATE_IMPORT_LOG_STATUS_FAILED = "failed"
+TEMPLATE_IMPORT_LOG_STATUS_ROLLED_BACK = "rolled_back"
+
+VALID_TEMPLATE_IMPORT_LOG_STATUSES = {
+    TEMPLATE_IMPORT_LOG_STATUS_SUCCESS,
+    TEMPLATE_IMPORT_LOG_STATUS_PARTIAL,
+    TEMPLATE_IMPORT_LOG_STATUS_FAILED,
+    TEMPLATE_IMPORT_LOG_STATUS_ROLLED_BACK,
+}
+
+TEMPLATE_IMPORT_CONFLICT_SKIP = "skip"
+TEMPLATE_IMPORT_CONFLICT_OVERWRITE = "overwrite"
+TEMPLATE_IMPORT_CONFLICT_RENAME = "rename"
+VALID_TEMPLATE_IMPORT_CONFLICT_STRATEGIES = {
+    TEMPLATE_IMPORT_CONFLICT_SKIP,
+    TEMPLATE_IMPORT_CONFLICT_OVERWRITE,
+    TEMPLATE_IMPORT_CONFLICT_RENAME,
+}
+
+
 @dataclass
 class BatchTemplate:
     """批量任务模板"""
@@ -159,6 +181,17 @@ class BatchTemplate:
             "conflict_strategy": self.conflict_strategy,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+        }
+
+    def to_export_dict(self) -> dict[str, Any]:
+        """导出为可跨环境传输的字典（不含内部ID和时间戳）"""
+        import json
+        return {
+            "name": self.name,
+            "description": self.description,
+            "filters": json.loads(self.filters),
+            "updates": json.loads(self.updates),
+            "conflict_strategy": self.conflict_strategy,
         }
 
     def describe(self) -> str:
@@ -340,6 +373,42 @@ class Database:
 
                 CREATE INDEX IF NOT EXISTS idx_templates_name
                     ON batch_templates(name);
+
+                CREATE TABLE IF NOT EXISTS template_import_logs (
+                    id TEXT PRIMARY KEY,
+                    operation_type TEXT NOT NULL,
+                    operator TEXT DEFAULT '',
+                    source_file TEXT DEFAULT '',
+                    total_count INTEGER DEFAULT 0,
+                    success_count INTEGER DEFAULT 0,
+                    skipped_count INTEGER DEFAULT 0,
+                    overwritten_count INTEGER DEFAULT 0,
+                    renamed_count INTEGER DEFAULT 0,
+                    error_count INTEGER DEFAULT 0,
+                    conflict_strategy TEXT DEFAULT 'skip',
+                    status TEXT NOT NULL,
+                    error_message TEXT DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    completed_at TEXT DEFAULT ''
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_tpl_import_logs_created
+                    ON template_import_logs(created_at);
+                CREATE INDEX IF NOT EXISTS idx_tpl_import_logs_status
+                    ON template_import_logs(status);
+
+                CREATE TABLE IF NOT EXISTS template_import_items (
+                    id TEXT PRIMARY KEY,
+                    import_log_id TEXT NOT NULL,
+                    template_name TEXT NOT NULL,
+                    final_name TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    reason TEXT DEFAULT '',
+                    FOREIGN KEY (import_log_id) REFERENCES template_import_logs(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_tpl_import_items_log
+                    ON template_import_items(import_log_id);
             """)
 
     # ============ SourceRecord 操作 ============
@@ -746,3 +815,102 @@ class Database:
                 "DELETE FROM batch_templates WHERE id = ?",
                 (template_id,)
             )
+
+    # ============ 模板导入导出日志操作 ============
+
+    def create_template_import_log(self, operation_type: str, operator: str,
+                                   source_file: str, total_count: int,
+                                   conflict_strategy: str) -> str:
+        """创建模板导入/导出日志记录"""
+        log_id = "TPL-LOG-" + uuid.uuid4().hex[:12].upper()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO template_import_logs
+                   (id, operation_type, operator, source_file, total_count,
+                    success_count, skipped_count, overwritten_count,
+                    renamed_count, error_count, conflict_strategy,
+                    status, created_at)
+                   VALUES (?, ?, ?, ?, ?, 0, 0, 0, 0, 0, ?, 'pending', ?)""",
+                (log_id, operation_type, operator, source_file, total_count,
+                 conflict_strategy, now)
+            )
+        return log_id
+
+    def update_template_import_log_counts(self, log_id: str, success_count: int,
+                                          skipped_count: int, overwritten_count: int,
+                                          renamed_count: int, error_count: int) -> None:
+        """更新模板导入日志计数"""
+        with self._conn() as conn:
+            conn.execute(
+                """UPDATE template_import_logs SET
+                   success_count=?, skipped_count=?, overwritten_count=?,
+                   renamed_count=?, error_count=?
+                   WHERE id=?""",
+                (success_count, skipped_count, overwritten_count,
+                 renamed_count, error_count, log_id)
+            )
+
+    def complete_template_import_log(self, log_id: str, status: str,
+                                     error_message: str = "") -> None:
+        """标记模板导入日志为完成"""
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE template_import_logs SET status=?, error_message=?, completed_at=? WHERE id=?",
+                (status, error_message, now, log_id)
+            )
+
+    def add_template_import_item(self, log_id: str, template_name: str,
+                                 final_name: str, status: str,
+                                 reason: str = "") -> None:
+        """添加模板导入单项记录"""
+        item_id = str(uuid.uuid4())
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO template_import_items
+                   (id, import_log_id, template_name, final_name, status, reason)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (item_id, log_id, template_name, final_name, status, reason)
+            )
+
+    def get_template_import_log(self, log_id: str):
+        """获取模板导入日志"""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM template_import_logs WHERE id = ?",
+                (log_id,)
+            ).fetchone()
+            if not row:
+                return None
+            return dict(row)
+
+    def get_template_import_items(self, log_id: str) -> list[dict]:
+        """获取模板导入日志的所有单项记录"""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM template_import_items WHERE import_log_id = ? ORDER BY id",
+                (log_id,)
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_recent_template_import_logs(self, limit: int = 20) -> list[dict]:
+        """获取最近的模板导入导出日志"""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM template_import_logs ORDER BY created_at DESC LIMIT ?",
+                (limit,)
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def delete_templates_by_names(self, names: list[str]) -> int:
+        """按名称批量删除模板（用于回滚），返回实际删除数量"""
+        if not names:
+            return 0
+        placeholders = ",".join(["?"] * len(names))
+        with self._conn() as conn:
+            cur = conn.execute(
+                f"DELETE FROM batch_templates WHERE name IN ({placeholders})",
+                names
+            )
+            return cur.rowcount

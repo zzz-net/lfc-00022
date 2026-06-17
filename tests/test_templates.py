@@ -22,8 +22,9 @@ from inspection_cli.exporter import Exporter
 from inspection_cli.importer import RecordImporter
 from inspection_cli.merger import EventMerger
 from inspection_cli.templates import (
-    TemplateError, TemplateManager, TemplateValidationIssue,
-    TemplateValidationResult,
+    TemplateError, TemplateExportResult, TemplateImportError,
+    TemplateImportItemResult, TemplateImportResult, TemplateManager,
+    TemplateValidationIssue, TemplateValidationResult, TEMPLATE_EXPORT_VERSION,
 )
 
 
@@ -844,6 +845,822 @@ class TestTemplateFormatting(_TestBase):
         self.assertIn("状态→confirmed", desc)
         self.assertIn("处理人→H", desc)
         self.assertIn("force", desc)
+
+
+class TestTemplateExport(_TestBase):
+    """模板导出功能测试"""
+
+    def test_export_single_template_to_dict(self):
+        """导出单个模板为字典"""
+        self.template_manager.save_template(
+            name="export-single",
+            description="单模板导出测试",
+            batch_filter=BatchFilter(statuses=["unconfirmed"]),
+            batch_update=BatchUpdate(status="confirmed", handler="ExportTester"),
+        )
+        data = self.template_manager.export_template("export-single")
+        self.assertIsNotNone(data)
+        self.assertEqual(data["name"], "export-single")
+        self.assertEqual(data["description"], "单模板导出测试")
+        self.assertEqual(data["filters"]["statuses"], ["unconfirmed"])
+        self.assertEqual(data["updates"]["status"], "confirmed")
+        self.assertEqual(data["updates"]["handler"], "ExportTester")
+        self.assertNotIn("id", data)
+        self.assertNotIn("created_at", data)
+        self.assertNotIn("updated_at", data)
+
+    def test_export_nonexistent_template_raises(self):
+        """导出不存在的模板应报错"""
+        with self.assertRaises(TemplateError) as ctx:
+            self.template_manager.export_template("no-such-template")
+        self.assertIn("不存在", str(ctx.exception))
+
+    def test_export_multiple_templates(self):
+        """批量导出多个模板"""
+        names = ["tpl-exp-1", "tpl-exp-2", "tpl-exp-3"]
+        for i, n in enumerate(names):
+            self.template_manager.save_template(
+                name=n,
+                description=f"模板{i}",
+                batch_filter=BatchFilter(statuses=["unconfirmed"]),
+                batch_update=BatchUpdate(status="confirmed", handler=f"H{i}"),
+            )
+
+        data = self.template_manager.export_templates(names[:2])
+        self.assertEqual(data["version"], TEMPLATE_EXPORT_VERSION)
+        self.assertEqual(data["template_count"], 2)
+        self.assertIn("exported_at", data)
+        exported_names = [t["name"] for t in data["templates"]]
+        self.assertEqual(sorted(exported_names), sorted(names[:2]))
+
+    def test_export_all_templates(self):
+        """不指定名称时导出全部模板"""
+        for i in range(3):
+            self.template_manager.save_template(
+                name=f"tpl-all-{i}",
+                description=f"全量导出{i}",
+                batch_filter=BatchFilter(statuses=["unconfirmed"]),
+                batch_update=BatchUpdate(status="confirmed"),
+            )
+        data = self.template_manager.export_templates()
+        self.assertEqual(data["template_count"], 3)
+
+    def test_export_empty_when_no_templates(self):
+        """没有模板时导出空集合"""
+        data = self.template_manager.export_templates()
+        self.assertEqual(data["template_count"], 0)
+        self.assertEqual(data["templates"], [])
+
+    def test_export_templates_to_file(self):
+        """导出到 JSON 文件"""
+        self.template_manager.save_template(
+            name="file-export",
+            description="文件导出测试",
+            batch_filter=BatchFilter(statuses=["unconfirmed", "confirmed"]),
+            batch_update=BatchUpdate(status="closed", handler="FileExporter"),
+        )
+        out_path = os.path.join(self.tmp_dir, "exported.json")
+        result = self.template_manager.export_templates_to_file(
+            out_path, names=["file-export"], operator="TestUser",
+        )
+        self.assertIsInstance(result, TemplateExportResult)
+        self.assertEqual(result.template_count, 1)
+        self.assertEqual(result.template_names, ["file-export"])
+        self.assertTrue(os.path.exists(out_path))
+
+        with open(out_path, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        self.assertEqual(loaded["version"], TEMPLATE_EXPORT_VERSION)
+        self.assertEqual(loaded["template_count"], 1)
+        self.assertEqual(loaded["templates"][0]["name"], "file-export")
+
+    def test_export_result_formatted(self):
+        """导出结果格式化输出"""
+        self.template_manager.save_template(
+            name="fmt-export",
+            description="格式化测试",
+            batch_filter=BatchFilter(),
+            batch_update=BatchUpdate(status="confirmed"),
+        )
+        out_path = os.path.join(self.tmp_dir, "fmt.json")
+        result = self.template_manager.export_templates_to_file(out_path)
+        formatted = result.formatted()
+        self.assertIn("已导出", formatted)
+        self.assertIn(out_path, formatted)
+        self.assertIn("1", formatted)
+
+
+class TestTemplateImportBasic(_TestBase):
+    """模板导入基础功能测试"""
+
+    def _make_export_json(self, templates: list[dict]) -> str:
+        data = {
+            "version": TEMPLATE_EXPORT_VERSION,
+            "exported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "template_count": len(templates),
+            "templates": templates,
+        }
+        path = os.path.join(self.tmp_dir, "import-source.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return path
+
+    def test_import_single_template(self):
+        """导入单个模板"""
+        tpl = {
+            "name": "imported-tpl",
+            "description": "从文件导入的模板",
+            "filters": {"event_ids": None, "device_ids": None, "statuses": ["unconfirmed"],
+                        "time_from": None, "time_to": None},
+            "updates": {"status": "confirmed", "handler": "ImportUser", "note": "导入测试"},
+            "conflict_strategy": "skip",
+        }
+        path = self._make_export_json([tpl])
+        result = self.template_manager.import_templates_from_file(path, operator="Tester")
+        self.assertIsInstance(result, TemplateImportResult)
+        self.assertEqual(result.total_count, 1)
+        self.assertEqual(result.success_count, 1)
+        self.assertEqual(result.skipped_count, 0)
+
+        loaded = self.template_manager.get_template("imported-tpl")
+        self.assertIsNotNone(loaded)
+        self.assertEqual(loaded.description, "从文件导入的模板")
+        self.assertEqual(loaded.conflict_strategy, "skip")
+
+    def test_import_multiple_templates(self):
+        """批量导入多个模板"""
+        tpls = [
+            {"name": "imp-1", "description": "批量导入1",
+             "filters": {"statuses": ["unconfirmed"], "event_ids": None,
+                         "device_ids": None, "time_from": None, "time_to": None},
+             "updates": {"status": "confirmed", "handler": "H", "note": None},
+             "conflict_strategy": "skip"},
+            {"name": "imp-2", "description": "批量导入2",
+             "filters": {"statuses": ["confirmed"], "event_ids": None,
+                         "device_ids": None, "time_from": None, "time_to": None},
+             "updates": {"status": "closed", "handler": "H", "note": None},
+             "conflict_strategy": "abort"},
+            {"name": "imp-3", "description": "批量导入3",
+             "filters": {"statuses": ["false_positive"], "event_ids": None,
+                         "device_ids": None, "time_from": None, "time_to": None},
+             "updates": {"status": "closed", "handler": "H", "note": None},
+             "conflict_strategy": "force"},
+        ]
+        path = self._make_export_json(tpls)
+        result = self.template_manager.import_templates_from_file(path)
+        self.assertEqual(result.total_count, 3)
+        self.assertEqual(result.success_count, 3)
+        for name in ["imp-1", "imp-2", "imp-3"]:
+            self.assertIsNotNone(self.template_manager.get_template(name))
+
+    def test_import_result_formatted(self):
+        """导入结果格式化输出"""
+        tpl = {
+            "name": "fmt-imp",
+            "description": "",
+            "filters": {"statuses": ["unconfirmed"], "event_ids": None,
+                        "device_ids": None, "time_from": None, "time_to": None},
+            "updates": {"status": "confirmed", "handler": "H", "note": None},
+            "conflict_strategy": "skip",
+        }
+        path = self._make_export_json([tpl])
+        result = self.template_manager.import_templates_from_file(path)
+        formatted = result.formatted()
+        self.assertIn("总计", formatted)
+        self.assertIn("成功", formatted)
+
+    def test_import_invalid_version_raises(self):
+        """导入版本不兼容的文件应报错"""
+        data = {
+            "version": "999.0",
+            "exported_at": "2026-06-17 10:00:00",
+            "template_count": 1,
+            "templates": [{"name": "x", "description": "",
+                           "filters": {}, "updates": {}}],
+        }
+        path = os.path.join(self.tmp_dir, "bad-version.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+
+        with self.assertRaises(TemplateImportError) as ctx:
+            self.template_manager.import_templates_from_file(path)
+        self.assertIn("版本", str(ctx.exception))
+        self.assertIn("999.0", str(ctx.exception))
+
+    def test_import_missing_required_field_raises(self):
+        """模板缺少必填字段应报错"""
+        bad_tpl = {
+            "description": "缺少name字段",
+            "filters": {"statuses": ["unconfirmed"], "event_ids": None,
+                        "device_ids": None, "time_from": None, "time_to": None},
+            "updates": {"status": "confirmed", "handler": "H", "note": None},
+        }
+        path = self._make_export_json([bad_tpl])
+        with self.assertRaises(TemplateImportError):
+            self.template_manager.import_templates_from_file(path)
+
+
+class TestTemplateImportConflict(_TestBase):
+    """模板导入冲突策略测试"""
+
+    def _make_export_json(self, templates: list[dict]) -> str:
+        data = {
+            "version": TEMPLATE_EXPORT_VERSION,
+            "exported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "template_count": len(templates),
+            "templates": templates,
+        }
+        path = os.path.join(self.tmp_dir, f"import-conflict-{id(self)}.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return path
+
+    def _make_tpl_dict(self, name: str, description: str = "测试模板") -> dict:
+        return {
+            "name": name, "description": description,
+            "filters": {"statuses": ["unconfirmed"], "event_ids": None,
+                        "device_ids": None, "time_from": None, "time_to": None},
+            "updates": {"status": "confirmed", "handler": "H", "note": None},
+            "conflict_strategy": "skip",
+        }
+
+    def test_conflict_strategy_skip(self):
+        """skip 策略：同名模板跳过，不覆盖，明确输出跳过原因"""
+        self.template_manager.save_template(
+            name="conflict-tpl",
+            description="原版本",
+            batch_filter=BatchFilter(statuses=["unconfirmed"]),
+            batch_update=BatchUpdate(status="confirmed", handler="Original"),
+        )
+
+        path = self._make_export_json([self._make_tpl_dict("conflict-tpl", "新版本")])
+        result = self.template_manager.import_templates_from_file(
+            path, conflict_strategy="skip",
+        )
+        self.assertEqual(result.total_count, 1)
+        self.assertEqual(result.success_count, 0)
+        self.assertEqual(result.skipped_count, 1)
+
+        original = self.template_manager.get_template("conflict-tpl")
+        self.assertEqual(original.description, "原版本")
+        self.assertEqual(original.conflict_strategy, "skip")
+
+        self.assertIsNotNone(result.log_id)
+        self.assertEqual(len(result.items), 1)
+        self.assertEqual(result.items[0].status, "skipped")
+        self.assertIn("已存在", result.items[0].reason)
+        self.assertFalse(result.has_errors)
+
+    def test_conflict_strategy_overwrite(self):
+        """overwrite 策略：同名模板覆盖"""
+        self.template_manager.save_template(
+            name="overwrite-tpl",
+            description="原版本",
+            batch_filter=BatchFilter(statuses=["unconfirmed"]),
+            batch_update=BatchUpdate(status="confirmed", handler="Original"),
+        )
+
+        new_version = self._make_tpl_dict("overwrite-tpl", "覆盖后的版本")
+        new_version["updates"]["status"] = "closed"
+        new_version["updates"]["handler"] = "Overwriter"
+        path = self._make_export_json([new_version])
+
+        result = self.template_manager.import_templates_from_file(
+            path, conflict_strategy="overwrite",
+        )
+        self.assertEqual(result.success_count, 1)
+        self.assertEqual(result.overwritten_count, 1)
+
+        loaded = self.template_manager.get_template("overwrite-tpl")
+        self.assertEqual(loaded.description, "覆盖后的版本")
+        bf, bu, cs = self.template_manager.template_to_objects(loaded)
+        self.assertEqual(bu.status, "closed")
+        self.assertEqual(bu.handler, "Overwriter")
+
+    def test_conflict_strategy_rename(self):
+        """rename 策略：同名模板自动重命名"""
+        self.template_manager.save_template(
+            name="rename-tpl",
+            description="原版本",
+            batch_filter=BatchFilter(statuses=["unconfirmed"]),
+            batch_update=BatchUpdate(status="confirmed", handler="Original"),
+        )
+
+        path = self._make_export_json([self._make_tpl_dict("rename-tpl", "新版本")])
+        result = self.template_manager.import_templates_from_file(
+            path, conflict_strategy="rename",
+        )
+        self.assertEqual(result.success_count, 1)
+        self.assertEqual(result.renamed_count, 1)
+        self.assertEqual(len(result.items), 1)
+
+        original = self.template_manager.get_template("rename-tpl")
+        self.assertEqual(original.description, "原版本")
+
+        new_name = result.items[0].final_name
+        self.assertNotEqual(new_name, "rename-tpl")
+        self.assertIn("rename-tpl", new_name)
+        self.assertIn("imported", new_name)
+
+        renamed = self.template_manager.get_template(new_name)
+        self.assertIsNotNone(renamed)
+        self.assertEqual(renamed.description, "新版本")
+
+    def test_conflict_strategy_rename_multiple_conflicts(self):
+        """rename 策略：多次重命名产生正确的递增后缀"""
+        self.template_manager.save_template(
+            name="multi-rename",
+            description="原版本",
+            batch_filter=BatchFilter(),
+            batch_update=BatchUpdate(status="confirmed", handler="H"),
+        )
+        tpl_dict = self._make_tpl_dict("multi-rename", "导入版本")
+
+        for i in range(3):
+            path = self._make_export_json([tpl_dict])
+            result = self.template_manager.import_templates_from_file(
+                path, conflict_strategy="rename",
+            )
+            self.assertEqual(result.renamed_count, 1)
+
+        all_names = [t.name for t in self.template_manager.list_templates()]
+        self.assertIn("multi-rename", all_names)
+        self.assertIn("multi-rename-imported-1", all_names)
+        self.assertIn("multi-rename-imported-2", all_names)
+        self.assertIn("multi-rename-imported-3", all_names)
+        self.assertEqual(len(all_names), 4)
+
+    def test_conflict_invalid_strategy_raises(self):
+        """无效冲突策略应报错"""
+        path = self._make_export_json([self._make_tpl_dict("bad-cs")])
+        with self.assertRaises(TemplateImportError) as ctx:
+            self.template_manager.import_templates_from_file(
+                path, conflict_strategy="bogus",
+            )
+        self.assertIn("冲突策略", str(ctx.exception))
+
+
+class TestTemplateImportCompatibility(_TestBase):
+    """模板导入兼容性校验测试"""
+
+    def _make_export_json(self, templates: list[dict]) -> str:
+        data = {
+            "version": TEMPLATE_EXPORT_VERSION,
+            "exported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "template_count": len(templates),
+            "templates": templates,
+        }
+        path = os.path.join(self.tmp_dir, f"compat-{id(self)}.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return path
+
+    def test_incompatible_status_enum_is_rejected(self):
+        """状态枚举不兼容：模板使用了当前配置不存在的状态，应报错并说明原因"""
+        bad_tpl = {
+            "name": "bad-status-tpl",
+            "description": "使用了不存在的状态",
+            "filters": {"statuses": ["unconfirmed", "old_archived_status"],
+                        "event_ids": None, "device_ids": None,
+                        "time_from": None, "time_to": None},
+            "updates": {"status": "confirmed", "handler": "H", "note": None},
+            "conflict_strategy": "skip",
+        }
+        path = self._make_export_json([bad_tpl])
+        result = self.template_manager.import_templates_from_file(path)
+
+        self.assertEqual(result.success_count, 0)
+        self.assertEqual(result.error_count, 1)
+        self.assertTrue(result.has_errors)
+        self.assertEqual(len(result.items), 1)
+        self.assertIn("状态", result.items[0].reason)
+        self.assertIn("old_archived_status", result.items[0].reason)
+
+        loaded = self.template_manager.get_template("bad-status-tpl")
+        self.assertIsNone(loaded, "不兼容模板不应被写入数据库")
+
+    def test_incompatible_time_format_is_rejected(self):
+        """时间格式不兼容：模板时间格式与当前配置不匹配，应报错并说明原因"""
+        bad_tpl = {
+            "name": "bad-time-tpl",
+            "description": "使用了不兼容的时间格式",
+            "filters": {"statuses": ["unconfirmed"], "event_ids": None,
+                        "device_ids": None,
+                        "time_from": "15/06/2026 08:30",
+                        "time_to": "20/06/2026 18:00"},
+            "updates": {"status": "confirmed", "handler": "H", "note": None},
+            "conflict_strategy": "skip",
+        }
+        path = self._make_export_json([bad_tpl])
+        result = self.template_manager.import_templates_from_file(path)
+
+        self.assertEqual(result.success_count, 0)
+        self.assertEqual(result.error_count, 1)
+        self.assertTrue(result.has_errors)
+        self.assertIn("时间", result.items[0].reason)
+        self.assertIn("15/06/2026 08:30", result.items[0].reason)
+
+    def test_incompatible_target_status_is_rejected(self):
+        """目标状态不兼容：模板要更新到的状态不存在"""
+        bad_tpl = {
+            "name": "bad-target-tpl",
+            "description": "目标状态不存在",
+            "filters": {"statuses": ["unconfirmed"], "event_ids": None,
+                        "device_ids": None,
+                        "time_from": None, "time_to": None},
+            "updates": {"status": "deprecated_status_xyz", "handler": "H", "note": None},
+            "conflict_strategy": "skip",
+        }
+        path = self._make_export_json([bad_tpl])
+        result = self.template_manager.import_templates_from_file(path)
+        self.assertEqual(result.error_count, 1)
+        self.assertIn("deprecated_status_xyz", result.items[0].reason)
+
+    def test_empty_handler_is_rejected(self):
+        """处理人为空字符串应报错"""
+        bad_tpl = {
+            "name": "empty-handler-tpl",
+            "description": "处理人是空",
+            "filters": {"statuses": ["unconfirmed"], "event_ids": None,
+                        "device_ids": None, "time_from": None, "time_to": None},
+            "updates": {"handler": "  ", "status": None, "note": None},
+            "conflict_strategy": "skip",
+        }
+        path = self._make_export_json([bad_tpl])
+        result = self.template_manager.import_templates_from_file(path)
+        self.assertEqual(result.error_count, 1)
+        self.assertIn("handler", result.items[0].reason.lower())
+
+    def test_no_validate_skips_compatibility_check(self):
+        """--no-validate 跳过兼容性检查，不兼容模板仍可导入"""
+        bad_tpl = {
+            "name": "no-validate-tpl",
+            "description": "跳过校验",
+            "filters": {"statuses": ["unconfirmed", "bad_status_123"],
+                        "event_ids": None, "device_ids": None,
+                        "time_from": None, "time_to": None},
+            "updates": {"status": "confirmed", "handler": "H", "note": None},
+            "conflict_strategy": "skip",
+        }
+        path = self._make_export_json([bad_tpl])
+        result = self.template_manager.import_templates_from_file(
+            path, validate_compatibility=False,
+        )
+        self.assertEqual(result.success_count, 1)
+        self.assertIsNotNone(self.template_manager.get_template("no-validate-tpl"))
+
+    def test_compatible_template_with_warnings_imports(self):
+        """有警告但无错误的模板应成功导入（警告不阻止）"""
+        warn_tpl = {
+            "name": "warn-tpl",
+            "description": "含警告的模板",
+            "filters": {"statuses": ["unconfirmed"],
+                        "device_ids": ["NOT-A-REAL-PATTERN-123"],
+                        "event_ids": None,
+                        "time_from": None, "time_to": None},
+            "updates": {"status": "confirmed", "handler": "ValidHandler", "note": None},
+            "conflict_strategy": "skip",
+        }
+        path = self._make_export_json([warn_tpl])
+        result = self.template_manager.import_templates_from_file(path)
+        self.assertEqual(result.success_count, 1)
+        self.assertEqual(result.error_count, 0)
+        self.assertIsNotNone(self.template_manager.get_template("warn-tpl"))
+
+
+class TestTemplateImportRollback(_TestBase):
+    """模板导入回滚机制测试"""
+
+    def _make_export_json(self, templates: list[dict]) -> str:
+        data = {
+            "version": TEMPLATE_EXPORT_VERSION,
+            "exported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "template_count": len(templates),
+            "templates": templates,
+        }
+        path = os.path.join(self.tmp_dir, f"rollback-{id(self)}.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return path
+
+    def test_partial_error_rolls_back_all_imported_templates(self):
+        """部分模板出错时，默认回滚所有已导入的模板"""
+        good_tpl = {
+            "name": "rollback-good-1",
+            "description": "好模板1",
+            "filters": {"statuses": ["unconfirmed"], "event_ids": None,
+                        "device_ids": None, "time_from": None, "time_to": None},
+            "updates": {"status": "confirmed", "handler": "H", "note": None},
+            "conflict_strategy": "skip",
+        }
+        also_good = {
+            "name": "rollback-good-2",
+            "description": "好模板2",
+            "filters": {"statuses": ["unconfirmed"], "event_ids": None,
+                        "device_ids": None, "time_from": None, "time_to": None},
+            "updates": {"status": "confirmed", "handler": "H", "note": None},
+            "conflict_strategy": "skip",
+        }
+        bad_tpl = {
+            "name": "rollback-bad",
+            "description": "坏模板",
+            "filters": {"statuses": ["nonexistent_status"], "event_ids": None,
+                        "device_ids": None, "time_from": None, "time_to": None},
+            "updates": {"status": "confirmed", "handler": "H", "note": None},
+            "conflict_strategy": "skip",
+        }
+        path = self._make_export_json([good_tpl, also_good, bad_tpl])
+        result = self.template_manager.import_templates_from_file(
+            path, rollback_on_error=True,
+        )
+
+        self.assertTrue(result.has_errors)
+        self.assertTrue(result.rolled_back)
+        self.assertEqual(result.status, "rolled_back")
+
+        for name in ["rollback-good-1", "rollback-good-2", "rollback-bad"]:
+            self.assertIsNone(
+                self.template_manager.get_template(name),
+                f"回滚后模板 {name} 不应存在",
+            )
+
+    def test_no_rollback_preserves_successes(self):
+        """--no-rollback：出错时保留已成功导入的模板"""
+        good_tpl = {
+            "name": "keep-good",
+            "description": "保留的好模板",
+            "filters": {"statuses": ["unconfirmed"], "event_ids": None,
+                        "device_ids": None, "time_from": None, "time_to": None},
+            "updates": {"status": "confirmed", "handler": "H", "note": None},
+            "conflict_strategy": "skip",
+        }
+        bad_tpl = {
+            "name": "keep-bad",
+            "description": "坏模板",
+            "filters": {"statuses": ["does_not_exist"], "event_ids": None,
+                        "device_ids": None, "time_from": None, "time_to": None},
+            "updates": {"status": "confirmed", "handler": "H", "note": None},
+            "conflict_strategy": "skip",
+        }
+        path = self._make_export_json([good_tpl, bad_tpl])
+        result = self.template_manager.import_templates_from_file(
+            path, rollback_on_error=False,
+        )
+
+        self.assertTrue(result.has_errors)
+        self.assertFalse(result.rolled_back)
+        self.assertEqual(result.success_count, 1)
+        self.assertEqual(result.error_count, 1)
+
+        self.assertIsNotNone(self.template_manager.get_template("keep-good"))
+        self.assertIsNone(self.template_manager.get_template("keep-bad"))
+
+    def test_overwritten_templates_rolled_back(self):
+        """回滚时，被 overwrite 的原模板应恢复"""
+        self.template_manager.save_template(
+            name="orig-overwrite",
+            description="原始版本",
+            batch_filter=BatchFilter(statuses=["unconfirmed"]),
+            batch_update=BatchUpdate(status="confirmed", handler="OriginalHandler"),
+        )
+        orig_tpl = self.template_manager.get_template("orig-overwrite")
+        orig_description = orig_tpl.description
+
+        imported_version = {
+            "name": "orig-overwrite",
+            "description": "导入覆盖版本",
+            "filters": {"statuses": ["unconfirmed"], "event_ids": None,
+                        "device_ids": None, "time_from": None, "time_to": None},
+            "updates": {"status": "closed", "handler": "OverwriteHandler", "note": None},
+            "conflict_strategy": "skip",
+        }
+        bad_tpl = {
+            "name": "rollback-trigger",
+            "description": "触发回滚",
+            "filters": {"statuses": ["invalid_status_xyz"], "event_ids": None,
+                        "device_ids": None, "time_from": None, "time_to": None},
+            "updates": {"status": "confirmed", "handler": "H", "note": None},
+            "conflict_strategy": "skip",
+        }
+        path = self._make_export_json([imported_version, bad_tpl])
+        result = self.template_manager.import_templates_from_file(
+            path, conflict_strategy="overwrite", rollback_on_error=True,
+        )
+
+        self.assertTrue(result.rolled_back)
+        restored = self.template_manager.get_template("orig-overwrite")
+        self.assertIsNotNone(restored)
+        self.assertEqual(restored.description, orig_description)
+        bf, bu, cs = self.template_manager.template_to_objects(restored)
+        self.assertEqual(bu.status, "confirmed")
+        self.assertEqual(bu.handler, "OriginalHandler")
+
+
+class TestTemplateImportPersistence(_TestBase):
+    """模板导入后重启持久化测试"""
+
+    def test_imported_template_survives_manager_restart(self):
+        """导入后的模板在重启 TemplateManager（重新连接 SQLite）后仍然存在"""
+        tpl = {
+            "name": "survives-restart",
+            "description": "重启后仍然存在的模板",
+            "filters": {"statuses": ["unconfirmed", "confirmed"],
+                        "device_ids": ["DEV-A001", "DEV-B002"],
+                        "event_ids": None,
+                        "time_from": "2026-06-15 08:00:00",
+                        "time_to": "2026-06-15 18:00:00"},
+            "updates": {"status": "closed", "handler": "PersistentUser",
+                        "note": "持久化验证"},
+            "conflict_strategy": "abort",
+        }
+        data = {
+            "version": TEMPLATE_EXPORT_VERSION,
+            "exported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "template_count": 1,
+            "templates": [tpl],
+        }
+        path = os.path.join(self.tmp_dir, "persistent-import.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+        result = self.template_manager.import_templates_from_file(path, operator="PersistentTester")
+        self.assertEqual(result.success_count, 1)
+
+        bf_before, bu_before, cs_before = self.template_manager.template_to_objects(
+            self.template_manager.get_template("survives-restart"),
+        )
+
+        del self.template_manager
+        del self.db
+
+        new_db = Database(self.db_path)
+        new_config = AppConfig(db_path=self.db_path)
+        new_tm = TemplateManager(new_db, new_config)
+
+        loaded = new_tm.get_template("survives-restart")
+        self.assertIsNotNone(loaded, "重启后模板应存在")
+        self.assertEqual(loaded.name, "survives-restart")
+        self.assertEqual(loaded.description, "重启后仍然存在的模板")
+
+        bf_after, bu_after, cs_after = new_tm.template_to_objects(loaded)
+        self.assertEqual(bf_before.statuses, bf_after.statuses)
+        self.assertEqual(bf_before.device_ids, bf_after.device_ids)
+        self.assertEqual(bf_before.time_from, bf_after.time_from)
+        self.assertEqual(bf_before.time_to, bf_after.time_to)
+        self.assertEqual(bu_before.status, bu_after.status)
+        self.assertEqual(bu_before.handler, bu_after.handler)
+        self.assertEqual(bu_before.note, bu_after.note)
+        self.assertEqual(cs_before, cs_after)
+
+    def test_export_round_trip(self):
+        """导出 -> 再导入的往返流程：数据完全一致"""
+        self.template_manager.save_template(
+            name="round-trip",
+            description="往返测试",
+            batch_filter=BatchFilter(
+                statuses=["unconfirmed"],
+                device_ids=["DEV-ABC123"],
+                time_from="2026-06-01 00:00:00",
+                time_to="2026-06-30 23:59:59",
+            ),
+            batch_update=BatchUpdate(
+                status="closed",
+                handler="RoundTripUser",
+                note="往返测试备注",
+            ),
+            conflict_strategy="force",
+        )
+        original = self.template_manager.get_template("round-trip")
+        bf_orig, bu_orig, cs_orig = self.template_manager.template_to_objects(original)
+
+        export_path = os.path.join(self.tmp_dir, "round-trip.json")
+        self.template_manager.export_templates_to_file(
+            export_path, names=["round-trip"], operator="Exporter",
+        )
+
+        self.template_manager.delete_template("round-trip")
+        self.assertIsNone(self.template_manager.get_template("round-trip"))
+
+        result = self.template_manager.import_templates_from_file(
+            export_path, operator="Importer",
+        )
+        self.assertEqual(result.success_count, 1)
+
+        reloaded = self.template_manager.get_template("round-trip")
+        self.assertIsNotNone(reloaded)
+        self.assertEqual(reloaded.description, "往返测试")
+
+        bf_new, bu_new, cs_new = self.template_manager.template_to_objects(reloaded)
+        self.assertEqual(bf_orig.event_ids, bf_new.event_ids)
+        self.assertEqual(bf_orig.device_ids, bf_new.device_ids)
+        self.assertEqual(bf_orig.statuses, bf_new.statuses)
+        self.assertEqual(bf_orig.time_from, bf_new.time_from)
+        self.assertEqual(bf_orig.time_to, bf_new.time_to)
+        self.assertEqual(bu_orig.status, bu_new.status)
+        self.assertEqual(bu_orig.handler, bu_new.handler)
+        self.assertEqual(bu_orig.note, bu_new.note)
+        self.assertEqual(cs_orig, cs_new)
+
+
+class TestTemplateImportLogs(_TestBase):
+    """模板导入导出日志功能测试"""
+
+    def test_export_creates_audit_log(self):
+        """导出操作会创建审计日志"""
+        self.template_manager.save_template(
+            name="log-export-tpl",
+            description="日志导出测试",
+            batch_filter=BatchFilter(),
+            batch_update=BatchUpdate(status="confirmed", handler="H"),
+        )
+        out_path = os.path.join(self.tmp_dir, "log-export.json")
+        self.template_manager.export_templates_to_file(
+            out_path, operator="LoggerUser",
+        )
+
+        logs_text = self.template_manager.get_template_import_logs(10)
+        self.assertIn("导出", logs_text)
+        self.assertIn("LoggerUser", logs_text)
+
+    def test_import_creates_audit_log(self):
+        """导入操作会创建审计日志"""
+        tpl = {
+            "name": "log-import-tpl",
+            "description": "日志导入测试",
+            "filters": {"statuses": ["unconfirmed"], "event_ids": None,
+                        "device_ids": None, "time_from": None, "time_to": None},
+            "updates": {"status": "confirmed", "handler": "H", "note": None},
+            "conflict_strategy": "skip",
+        }
+        data = {
+            "version": TEMPLATE_EXPORT_VERSION,
+            "exported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "template_count": 1,
+            "templates": [tpl],
+        }
+        path = os.path.join(self.tmp_dir, "log-import.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+        result = self.template_manager.import_templates_from_file(
+            path, operator="ImportLogger",
+        )
+        self.assertIsNotNone(result.log_id)
+
+        logs_text = self.template_manager.get_template_import_logs(10)
+        self.assertIn("导入", logs_text)
+        self.assertIn("ImportLogger", logs_text)
+        self.assertIn(result.log_id, logs_text)
+
+    def test_log_detail_shows_item_results(self):
+        """日志详情显示每个模板的处理结果"""
+        self.template_manager.save_template(
+            name="detail-conflict",
+            description="已存在的模板",
+            batch_filter=BatchFilter(),
+            batch_update=BatchUpdate(status="confirmed", handler="H"),
+        )
+        tpl1 = {
+            "name": "detail-new",
+            "description": "新模板",
+            "filters": {"statuses": ["unconfirmed"], "event_ids": None,
+                        "device_ids": None, "time_from": None, "time_to": None},
+            "updates": {"status": "confirmed", "handler": "H", "note": None},
+            "conflict_strategy": "skip",
+        }
+        tpl2 = {
+            "name": "detail-conflict",
+            "description": "冲突模板",
+            "filters": {"statuses": ["unconfirmed"], "event_ids": None,
+                        "device_ids": None, "time_from": None, "time_to": None},
+            "updates": {"status": "confirmed", "handler": "H", "note": None},
+            "conflict_strategy": "skip",
+        }
+        data = {
+            "version": TEMPLATE_EXPORT_VERSION,
+            "exported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "template_count": 2,
+            "templates": [tpl1, tpl2],
+        }
+        path = os.path.join(self.tmp_dir, "detail-import.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+        result = self.template_manager.import_templates_from_file(
+            path, conflict_strategy="skip", operator="DetailTester",
+        )
+        detail = self.template_manager.get_template_import_log_detail(result.log_id)
+        self.assertIn("detail-new", detail)
+        self.assertIn("detail-conflict", detail)
+        self.assertIn("成功", detail)
+        self.assertIn("跳过", detail)
+        self.assertIn("DetailTester", detail)
+        self.assertIn("skip", detail)
+
+    def test_logs_empty_when_no_operations(self):
+        """没有任何操作时日志为空"""
+        text = self.template_manager.get_template_import_logs(10)
+        self.assertIn("暂无", text)
 
 
 if __name__ == "__main__":

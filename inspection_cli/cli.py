@@ -17,7 +17,11 @@ from .database import (
 from .exporter import Exporter
 from .importer import RecordImporter
 from .merger import EventMerger
-from .templates import TemplateError, TemplateManager
+from .database import (
+    TEMPLATE_IMPORT_CONFLICT_OVERWRITE, TEMPLATE_IMPORT_CONFLICT_RENAME,
+    TEMPLATE_IMPORT_CONFLICT_SKIP,
+)
+from .templates import TemplateError, TemplateImportError, TemplateManager
 
 
 class CliContext:
@@ -501,6 +505,77 @@ def cmd_template_delete(ctx: CliContext, name: str, yes: bool) -> None:
     except TemplateError as e:
         click.echo(f"错误: {e}", err=True)
         sys.exit(1)
+
+
+@main.command("template-export", help="将模板导出为 JSON 文件（单个或批量）")
+@click.argument("output_path", type=click.Path(dir_okay=False))
+@click.option("-n", "--name", "names", multiple=True, default=None,
+              help="指定要导出的模板名称（可多次使用），不指定时导出全部模板")
+@click.option("-H", "--operator", default="", help="操作人（用于日志）")
+@pass_ctx
+def cmd_template_export(ctx: CliContext, output_path: str, names: tuple[str, ...],
+                        operator: str) -> None:
+    """导出模板"""
+    try:
+        name_list = list(names) if names else None
+        result = ctx.template_manager.export_templates_to_file(
+            output_path=output_path,
+            names=name_list,
+            operator=operator,
+        )
+        click.echo(result.formatted())
+    except TemplateError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("template-import", help="从 JSON 文件导入模板")
+@click.argument("file_path", type=click.Path(exists=True, dir_okay=False))
+@click.option("--conflict-strategy",
+              type=click.Choice(["skip", "overwrite", "rename"], case_sensitive=False),
+              default="skip",
+              help="名称冲突处理策略：skip（跳过）/ overwrite（覆盖）/ rename（自动重命名），默认 skip")
+@click.option("--no-validate", is_flag=True, default=False,
+              help="跳过兼容性检查（不推荐）")
+@click.option("--no-rollback", is_flag=True, default=False,
+              help="出错时不回滚，保留已成功导入的模板")
+@click.option("-H", "--operator", default="", help="操作人（用于日志）")
+@pass_ctx
+def cmd_template_import(ctx: CliContext, file_path: str, conflict_strategy: str,
+                        no_validate: bool, no_rollback: bool, operator: str) -> None:
+    """导入模板"""
+    try:
+        if conflict_strategy:
+            conflict_strategy = conflict_strategy.lower()
+        result = ctx.template_manager.import_templates_from_file(
+            file_path=file_path,
+            conflict_strategy=conflict_strategy,
+            operator=operator,
+            validate_compatibility=not no_validate,
+            rollback_on_error=not no_rollback,
+        )
+        click.echo(result.formatted())
+        if result.has_errors:
+            sys.exit(1)
+    except (TemplateError, TemplateImportError) as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("template-import-logs", help="查看模板导入导出日志")
+@click.option("-n", "--limit", type=int, default=20, help="显示最近的N条记录")
+@pass_ctx
+def cmd_template_import_logs(ctx: CliContext, limit: int) -> None:
+    """查看模板导入导出日志"""
+    click.echo(ctx.template_manager.get_template_import_logs(limit))
+
+
+@main.command("template-import-detail", help="查看某次模板导入/导出的详细信息")
+@click.argument("log_id")
+@pass_ctx
+def cmd_template_import_detail(ctx: CliContext, log_id: str) -> None:
+    """查看模板导入/导出详情"""
+    click.echo(ctx.template_manager.get_template_import_log_detail(log_id))
 
 
 @main.command("batch-annotate", help="批量标注事件状态（支持筛选、模板、预览、版本冲突检测）")

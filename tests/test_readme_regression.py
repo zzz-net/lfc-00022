@@ -80,8 +80,9 @@ class TestReadmeEncoding:
 _LEGAL_CMDS = {
     "annotate", "batch-annotate", "batch-cleanup", "batch-detail",
     "batch-logs", "export", "import", "init-demo", "list", "merge",
-    "statuses", "template-copy", "template-delete", "template-list",
-    "template-save", "template-show", "undo",
+    "statuses", "template-copy", "template-delete", "template-export",
+    "template-import", "template-import-detail", "template-import-logs",
+    "template-list", "template-save", "template-show", "undo",
 }
 # 文档里的命令用了 -c samples/config.yaml，且占位符如 <事件ID>、<模板名> 等。
 # 为了"可复制"校验，我们：
