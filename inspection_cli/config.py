@@ -112,6 +112,20 @@ class DutyConfig:
 
 
 @dataclass
+class SnapshotConfig:
+    """值班对账快照配置"""
+    exportable_teams: list[str] = field(default_factory=list)
+    allow_rollback: bool = True
+    max_retention_per_team: int = 100
+    require_team_for_generation: bool = True
+    allow_generate_after_handover: bool = False
+    log_retention_days: int = 180
+    allowed_export_roles: list[str] = field(default_factory=lambda: ["leader", "manager"])
+    allowed_generate_roles: list[str] = field(default_factory=lambda: ["leader", "manager", "engineer"])
+    allowed_import_roles: list[str] = field(default_factory=lambda: ["manager"])
+
+
+@dataclass
 class AppConfig:
     """应用配置"""
     validation: ValidationRules = field(default_factory=ValidationRules)
@@ -120,6 +134,7 @@ class AppConfig:
     batch: BatchConfig = field(default_factory=BatchConfig)
     ticket: TicketConfig = field(default_factory=TicketConfig)
     duty: DutyConfig = field(default_factory=DutyConfig)
+    snapshot: SnapshotConfig = field(default_factory=SnapshotConfig)
     db_path: str = "inspection.db"
 
     @classmethod
@@ -308,6 +323,55 @@ class AppConfig:
                 if not dt["valid_shifts"]:
                     raise ConfigError("duty.valid_shifts 不能为空列表")
                 cfg.duty.valid_shifts = dt["valid_shifts"]
+
+        if "snapshot" in raw:
+            sp = raw["snapshot"]
+            if not isinstance(sp, dict):
+                raise ConfigError("snapshot 必须是字典")
+            if "exportable_teams" in sp:
+                if not isinstance(sp["exportable_teams"], list):
+                    raise ConfigError("snapshot.exportable_teams 必须是列表")
+                if not all(isinstance(t, str) for t in sp["exportable_teams"]):
+                    raise ConfigError("snapshot.exportable_teams 列表元素必须是字符串")
+                cfg.snapshot.exportable_teams = sp["exportable_teams"]
+            if "allow_rollback" in sp:
+                if not isinstance(sp["allow_rollback"], bool):
+                    raise ConfigError("snapshot.allow_rollback 必须是布尔值")
+                cfg.snapshot.allow_rollback = sp["allow_rollback"]
+            if "max_retention_per_team" in sp:
+                if not isinstance(sp["max_retention_per_team"], int) or sp["max_retention_per_team"] <= 0:
+                    raise ConfigError("snapshot.max_retention_per_team 必须是正整数")
+                cfg.snapshot.max_retention_per_team = sp["max_retention_per_team"]
+            if "require_team_for_generation" in sp:
+                if not isinstance(sp["require_team_for_generation"], bool):
+                    raise ConfigError("snapshot.require_team_for_generation 必须是布尔值")
+                cfg.snapshot.require_team_for_generation = sp["require_team_for_generation"]
+            if "allow_generate_after_handover" in sp:
+                if not isinstance(sp["allow_generate_after_handover"], bool):
+                    raise ConfigError("snapshot.allow_generate_after_handover 必须是布尔值")
+                cfg.snapshot.allow_generate_after_handover = sp["allow_generate_after_handover"]
+            if "log_retention_days" in sp:
+                if not isinstance(sp["log_retention_days"], int) or sp["log_retention_days"] <= 0:
+                    raise ConfigError("snapshot.log_retention_days 必须是正整数")
+                cfg.snapshot.log_retention_days = sp["log_retention_days"]
+            if "allowed_export_roles" in sp:
+                if not isinstance(sp["allowed_export_roles"], list):
+                    raise ConfigError("snapshot.allowed_export_roles 必须是列表")
+                if not all(isinstance(r, str) for r in sp["allowed_export_roles"]):
+                    raise ConfigError("snapshot.allowed_export_roles 列表元素必须是字符串")
+                cfg.snapshot.allowed_export_roles = sp["allowed_export_roles"]
+            if "allowed_generate_roles" in sp:
+                if not isinstance(sp["allowed_generate_roles"], list):
+                    raise ConfigError("snapshot.allowed_generate_roles 必须是列表")
+                if not all(isinstance(r, str) for r in sp["allowed_generate_roles"]):
+                    raise ConfigError("snapshot.allowed_generate_roles 列表元素必须是字符串")
+                cfg.snapshot.allowed_generate_roles = sp["allowed_generate_roles"]
+            if "allowed_import_roles" in sp:
+                if not isinstance(sp["allowed_import_roles"], list):
+                    raise ConfigError("snapshot.allowed_import_roles 必须是列表")
+                if not all(isinstance(r, str) for r in sp["allowed_import_roles"]):
+                    raise ConfigError("snapshot.allowed_import_roles 列表元素必须是字符串")
+                cfg.snapshot.allowed_import_roles = sp["allowed_import_roles"]
 
         if "db_path" in raw:
             if not isinstance(raw["db_path"], str):

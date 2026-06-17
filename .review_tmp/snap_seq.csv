@@ -1,0 +1,3 @@
+﻿snapshot_id,team_id,team_name,snapshot_date,snapshot_point,operator,status,note,source,checksum,created_at,member_count,schedule_count,handover_count,escalation_log_count
+SNAP-4638922BF251,TEAM-E0546F1BD883,Alpha,2026-06-17,post-allow,LeaderA,active,allowed,manual,ab9635a7f18e5b576340a484ebd6df1fe1ebb8fb032a66512ba7d3546fcac465,2026-06-17 14:42:08,3,2,1,1
+SNAP-AB00A53F4449,TEAM-E0546F1BD883,Alpha,2026-06-17,pre,LeaderA,active,before,manual,b0673ab465732e25e4fe8bf2ebfac97885cc312efa90b735fce917079e270ffe,2026-06-17 14:41:46,3,2,0,1

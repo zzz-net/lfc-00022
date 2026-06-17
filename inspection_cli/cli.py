@@ -43,6 +43,9 @@ from .duty_io import (
     DUTY_IMPORT_CONFLICT_SKIP, DUTY_IMPORT_CONFLICT_ABORT,
     DUTY_IMPORT_CONFLICT_FORCE, VALID_DUTY_IMPORT_CONFLICT_STRATEGIES,
 )
+from .duty_snapshot import (
+    DutySnapshotManager, SnapshotError, SnapshotConflictError, SnapshotPermissionError,
+)
 from .database import (
     VALID_DUTY_ROLES, VALID_DUTY_SHIFTS,
     DUTY_ESCALATION_STATUS_PENDING, DUTY_ESCALATION_STATUS_ESCALATED,
@@ -74,6 +77,9 @@ class CliContext:
         self.duty_escalation_engine = DutyEscalationEngine(self.db, self.config, self.duty_manager)
         self.duty_handover_manager = DutyHandoverManager(self.db, self.config, self.duty_manager)
         self.duty_io_manager = DutyIOManager(self.db, self.config, self.duty_manager)
+        self.snapshot_manager = DutySnapshotManager(
+            self.db, self.config, self.duty_manager, self.duty_handover_manager
+        )
 
 
 pass_ctx = click.make_pass_decorator(CliContext)
@@ -1733,6 +1739,229 @@ def cmd_duty_shifts(ctx: CliContext) -> None:
         else:
             time_str = time_range
         click.echo(f"  {shift}: {label} ({time_str})")
+
+
+# ============ 值班对账快照命令 ============
+
+@main.command("snapshot-generate", help="生成值班对账快照")
+@click.option("--team-id", required=True, help="班组ID")
+@click.option("-H", "--operator", required=True, help="操作人姓名")
+@click.option("-p", "--snapshot-point", default="", help="快照时点标识（如 早班前、交班后）")
+@click.option("-d", "--snapshot-date", default=None, help="快照日期 (YYYY-MM-DD)，默认今天")
+@click.option("-n", "--note", default="", help="备注")
+@pass_ctx
+def cmd_snapshot_generate(ctx: CliContext, team_id: str, operator: str,
+                           snapshot_point: str, snapshot_date: str | None,
+                           note: str) -> None:
+    """生成快照"""
+    try:
+        result = ctx.snapshot_manager.generate_snapshot(
+            team_id=team_id,
+            operator=operator,
+            snapshot_point=snapshot_point,
+            snapshot_date=snapshot_date,
+            note=note,
+        )
+        click.echo(result.formatted())
+    except SnapshotConflictError as e:
+        click.echo(f"冲突: {e}", err=True)
+        sys.exit(1)
+    except SnapshotPermissionError as e:
+        click.echo(f"权限不足: {e}", err=True)
+        sys.exit(1)
+    except SnapshotError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("snapshot-query", help="查询值班对账快照")
+@click.option("--team-id", default=None, help="按班组ID筛选")
+@click.option("-d", "--snapshot-date", default=None, help="按日期筛选 (YYYY-MM-DD)")
+@click.option("--date-from", default=None, help="日期范围起始")
+@click.option("--date-to", default=None, help="日期范围截止")
+@click.option("--operator", "op", default=None, help="按操作人筛选")
+@click.option("--status", default=None, help="按状态筛选 (active/deleted/imported/rolled_back)")
+@click.option("-n", "--limit", type=int, default=None, help="限制返回数量")
+@pass_ctx
+def cmd_snapshot_query(ctx: CliContext, team_id: str | None, snapshot_date: str | None,
+                        date_from: str | None, date_to: str | None,
+                        op: str | None, status: str | None,
+                        limit: int | None) -> None:
+    """查询快照"""
+    snapshots = ctx.snapshot_manager.query_snapshots(
+        team_id=team_id,
+        snapshot_date=snapshot_date,
+        date_from=date_from,
+        date_to=date_to,
+        operator=op,
+        status=status,
+        limit=limit,
+    )
+    click.echo(ctx.snapshot_manager.format_snapshot_list(snapshots))
+
+
+@main.command("snapshot-show", help="查看快照详情")
+@click.argument("snapshot_id")
+@pass_ctx
+def cmd_snapshot_show(ctx: CliContext, snapshot_id: str) -> None:
+    """查看快照详情"""
+    detail = ctx.snapshot_manager.get_snapshot_detail(snapshot_id)
+    if detail is None:
+        click.echo(f"快照不存在: {snapshot_id}", err=True)
+        sys.exit(1)
+    click.echo(ctx.snapshot_manager.format_snapshot_detail(detail))
+
+
+@main.command("snapshot-diff", help="比对两份快照的差异")
+@click.argument("snapshot_a_id")
+@click.argument("snapshot_b_id")
+@click.option("-H", "--operator", default="", help="操作人")
+@pass_ctx
+def cmd_snapshot_diff(ctx: CliContext, snapshot_a_id: str, snapshot_b_id: str,
+                       operator: str) -> None:
+    """比对快照差异"""
+    try:
+        result = ctx.snapshot_manager.diff_snapshots(
+            snapshot_a_id, snapshot_b_id, operator=operator
+        )
+        click.echo(result.formatted())
+    except SnapshotError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("snapshot-diff-detail", help="查看快照差异详情")
+@click.argument("diff_id")
+@pass_ctx
+def cmd_snapshot_diff_detail(ctx: CliContext, diff_id: str) -> None:
+    """查看差异详情"""
+    click.echo(ctx.snapshot_manager.format_diff_detail(diff_id))
+
+
+@main.command("snapshot-export", help="导出快照到文件（JSON/CSV）")
+@click.argument("output_path", type=click.Path(dir_okay=False))
+@click.option("--team-id", default=None, help="按班组ID导出")
+@click.option("-f", "--format", "fmt",
+              type=click.Choice(["csv", "json"], case_sensitive=False),
+              default=None, help="导出格式（默认按后缀推断）")
+@click.option("--no-content", is_flag=True, default=False,
+              help="不包含快照内容（仅导出元数据）")
+@click.option("-H", "--operator", default="", help="操作人")
+@pass_ctx
+def cmd_snapshot_export(ctx: CliContext, output_path: str, team_id: str | None,
+                         fmt: str | None, no_content: bool, operator: str) -> None:
+    """导出快照"""
+    try:
+        result = ctx.snapshot_manager.export_snapshots(
+            output_path=output_path,
+            team_id=team_id,
+            fmt=fmt,
+            operator=operator,
+            include_content=not no_content,
+        )
+        click.echo(result.formatted())
+    except SnapshotPermissionError as e:
+        click.echo(f"权限不足: {e}", err=True)
+        sys.exit(1)
+    except SnapshotError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("snapshot-import", help="从文件导入快照（JSON/CSV）")
+@click.argument("file_path", type=click.Path(exists=True, dir_okay=False))
+@click.option("--conflict-strategy",
+              type=click.Choice(["skip", "abort", "force"], case_sensitive=False),
+              default="skip",
+              help="冲突处理策略：skip（跳过）/ abort（中止）/ force（覆盖），默认 skip")
+@click.option("-H", "--operator", default="", help="操作人")
+@pass_ctx
+def cmd_snapshot_import(ctx: CliContext, file_path: str, conflict_strategy: str,
+                         operator: str) -> None:
+    """导入快照"""
+    try:
+        if conflict_strategy:
+            conflict_strategy = conflict_strategy.lower()
+        result = ctx.snapshot_manager.import_snapshots(
+            file_path=file_path,
+            operator=operator,
+            conflict_strategy=conflict_strategy,
+        )
+        click.echo(result.formatted())
+        if result.items:
+            click.echo()
+            click.echo("详情:")
+            for item in result.items:
+                status_label = {
+                    "success": "成功",
+                    "skipped": "跳过",
+                    "conflict": "冲突",
+                    "error": "错误",
+                }.get(item["status"], item["status"])
+                click.echo(
+                    f"  [{status_label}] {item.get('snapshot_id', '')}: "
+                    f"{item.get('team_name', '')} - {item.get('reason', '')}"
+                )
+        if result.has_errors:
+            sys.exit(1)
+    except SnapshotPermissionError as e:
+        click.echo(f"权限不足: {e}", err=True)
+        sys.exit(1)
+    except SnapshotConflictError as e:
+        click.echo(f"冲突: {e}", err=True)
+        sys.exit(1)
+    except SnapshotError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("snapshot-rollback", help="回滚最近一次错误导入的快照")
+@click.option("--team-id", default=None, help="指定班组ID回滚")
+@click.option("-H", "--operator", required=True, help="操作人")
+@pass_ctx
+def cmd_snapshot_rollback(ctx: CliContext, team_id: str | None, operator: str) -> None:
+    """回滚错误导入"""
+    try:
+        result = ctx.snapshot_manager.rollback_last_import(
+            operator=operator, team_id=team_id
+        )
+        click.echo(result.formatted())
+    except SnapshotPermissionError as e:
+        click.echo(f"权限不足: {e}", err=True)
+        sys.exit(1)
+    except SnapshotError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("snapshot-verify", help="验证快照与当前数据库的一致性")
+@click.argument("snapshot_id")
+@pass_ctx
+def cmd_snapshot_verify(ctx: CliContext, snapshot_id: str) -> None:
+    """验证快照一致性"""
+    try:
+        result = ctx.snapshot_manager.verify_snapshot_consistency(snapshot_id)
+        click.echo(ctx.snapshot_manager.format_verify_result(result))
+    except SnapshotError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("snapshot-logs", help="查看快照操作日志")
+@click.option("--team-id", default=None, help="按班组ID筛选")
+@click.option("--operation", default=None,
+              type=click.Choice(["generate", "export", "import", "rollback", "delete", "diff"],
+                                case_sensitive=False),
+              help="按操作类型筛选")
+@click.option("--operator", "op", default=None, help="按操作人筛选")
+@click.option("-n", "--limit", type=int, default=50, help="显示最近的N条记录")
+@pass_ctx
+def cmd_snapshot_logs(ctx: CliContext, team_id: str | None, operation: str | None,
+                       op: str | None, limit: int) -> None:
+    """查看操作日志"""
+    click.echo(ctx.snapshot_manager.list_logs_formatted(
+        team_id=team_id, operation=operation, operator=op, limit=limit
+    ))
 
 
 if __name__ == "__main__":

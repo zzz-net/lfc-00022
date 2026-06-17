@@ -1,0 +1,280 @@
+[
+  {
+    "snapshot_id": "SNAP-4638922BF251",
+    "team_id": "TEAM-E0546F1BD883",
+    "team_name": "Alpha",
+    "snapshot_date": "2026-06-17",
+    "snapshot_point": "post-allow",
+    "operator": "LeaderA",
+    "status": "active",
+    "note": "allowed",
+    "source": "manual",
+    "checksum": "ab9635a7f18e5b576340a484ebd6df1fe1ebb8fb032a66512ba7d3546fcac465",
+    "created_at": "2026-06-17 14:42:08",
+    "content": {
+      "snapshot_id": "SNAP-4638922BF251",
+      "team_info": {
+        "team_id": "TEAM-E0546F1BD883",
+        "name": "Alpha",
+        "description": "reviewer",
+        "created_at": "2026-06-17 14:40:14",
+        "updated_at": "2026-06-17 14:40:14"
+      },
+      "members": [
+        {
+          "member_id": "MEM-3F8D9FD197E5",
+          "team_id": "TEAM-E0546F1BD883",
+          "name": "EngineerB",
+          "role": "engineer",
+          "phone": "",
+          "email": "",
+          "created_at": "2026-06-17 14:40:28",
+          "updated_at": "2026-06-17 14:40:28"
+        },
+        {
+          "member_id": "MEM-EA94B06D31EE",
+          "team_id": "TEAM-E0546F1BD883",
+          "name": "LeaderA",
+          "role": "leader",
+          "phone": "",
+          "email": "",
+          "created_at": "2026-06-17 14:40:28",
+          "updated_at": "2026-06-17 14:40:28"
+        },
+        {
+          "member_id": "MEM-651A28050A76",
+          "team_id": "TEAM-E0546F1BD883",
+          "name": "ManagerC",
+          "role": "manager",
+          "phone": "",
+          "email": "",
+          "created_at": "2026-06-17 14:40:28",
+          "updated_at": "2026-06-17 14:40:28"
+        }
+      ],
+      "schedules": [
+        {
+          "schedule_id": "SCHED-711E056B3018",
+          "team_id": "TEAM-E0546F1BD883",
+          "member_id": "MEM-3F8D9FD197E5",
+          "shift_type": "morning",
+          "schedule_date": "2026-06-17",
+          "start_time": "08:00",
+          "end_time": "16:00",
+          "escalation_level": 1,
+          "note": "",
+          "created_at": "2026-06-17 14:40:54",
+          "updated_at": "2026-06-17 14:41:53"
+        },
+        {
+          "schedule_id": "SCHED-CCE23C01F46A",
+          "team_id": "TEAM-E0546F1BD883",
+          "member_id": "MEM-3F8D9FD197E5",
+          "shift_type": "afternoon",
+          "schedule_date": "2026-06-17",
+          "start_time": "16:00",
+          "end_time": "00:00",
+          "escalation_level": 1,
+          "note": "",
+          "created_at": "2026-06-17 14:40:28",
+          "updated_at": "2026-06-17 14:40:28"
+        }
+      ],
+      "handovers": [
+        {
+          "handover_id": "HAND-54ABE4636C3F",
+          "team_id": "TEAM-E0546F1BD883",
+          "from_member_id": "MEM-EA94B06D31EE",
+          "to_member_id": "MEM-3F8D9FD197E5",
+          "operator_member_id": "MEM-EA94B06D31EE",
+          "schedule_id": "SCHED-711E056B3018",
+          "handed_at": "2026-06-17 14:41:53",
+          "note": "shift handover",
+          "status": "active",
+          "revoked_at": null,
+          "revoked_by": null,
+          "created_at": "2026-06-17 14:41:53",
+          "updated_at": "2026-06-17 14:41:53"
+        }
+      ],
+      "escalation_logs": [
+        {
+          "log_id": "LOG-C6D1669BA5C5",
+          "event_id": "EVT-SEQ-001",
+          "event_title": "disk alert",
+          "team_id": "TEAM-E0546F1BD883",
+          "schedule_id": "SCHED-711E056B3018",
+          "member_id": "MEM-EA94B06D31EE",
+          "escalation_level": 1,
+          "event_time": "2026-06-17 09:30:00",
+          "hit_time": "2026-06-17 14:41:36",
+          "status": "pending",
+          "handover_note": "review log",
+          "acknowledged_at": null,
+          "escalated_to": null,
+          "escalated_at": null,
+          "resolved_at": null,
+          "note": "",
+          "created_at": "2026-06-17 14:41:36",
+          "updated_at": "2026-06-17 14:41:36"
+        }
+      ],
+      "escalation_levels": [
+        {
+          "level_id": "ESC-E9986FAE3097",
+          "team_id": "TEAM-E0546F1BD883",
+          "level": 1,
+          "name": "L1",
+          "response_minutes": 30,
+          "escalation_minutes": 60,
+          "created_at": "2026-06-17 14:40:28"
+        },
+        {
+          "level_id": "ESC-ED009D7407A0",
+          "team_id": "TEAM-E0546F1BD883",
+          "level": 2,
+          "name": "L2",
+          "response_minutes": 60,
+          "escalation_minutes": 120,
+          "created_at": "2026-06-17 14:40:28"
+        }
+      ],
+      "time_windows": [],
+      "meta": {
+        "generated_at": "2026-06-17 14:42:08",
+        "cli_version": "1.0"
+      }
+    }
+  },
+  {
+    "snapshot_id": "SNAP-AB00A53F4449",
+    "team_id": "TEAM-E0546F1BD883",
+    "team_name": "Alpha",
+    "snapshot_date": "2026-06-17",
+    "snapshot_point": "pre",
+    "operator": "LeaderA",
+    "status": "active",
+    "note": "before",
+    "source": "manual",
+    "checksum": "b0673ab465732e25e4fe8bf2ebfac97885cc312efa90b735fce917079e270ffe",
+    "created_at": "2026-06-17 14:41:46",
+    "content": {
+      "snapshot_id": "SNAP-AB00A53F4449",
+      "team_info": {
+        "team_id": "TEAM-E0546F1BD883",
+        "name": "Alpha",
+        "description": "reviewer",
+        "created_at": "2026-06-17 14:40:14",
+        "updated_at": "2026-06-17 14:40:14"
+      },
+      "members": [
+        {
+          "member_id": "MEM-3F8D9FD197E5",
+          "team_id": "TEAM-E0546F1BD883",
+          "name": "EngineerB",
+          "role": "engineer",
+          "phone": "",
+          "email": "",
+          "created_at": "2026-06-17 14:40:28",
+          "updated_at": "2026-06-17 14:40:28"
+        },
+        {
+          "member_id": "MEM-EA94B06D31EE",
+          "team_id": "TEAM-E0546F1BD883",
+          "name": "LeaderA",
+          "role": "leader",
+          "phone": "",
+          "email": "",
+          "created_at": "2026-06-17 14:40:28",
+          "updated_at": "2026-06-17 14:40:28"
+        },
+        {
+          "member_id": "MEM-651A28050A76",
+          "team_id": "TEAM-E0546F1BD883",
+          "name": "ManagerC",
+          "role": "manager",
+          "phone": "",
+          "email": "",
+          "created_at": "2026-06-17 14:40:28",
+          "updated_at": "2026-06-17 14:40:28"
+        }
+      ],
+      "schedules": [
+        {
+          "schedule_id": "SCHED-711E056B3018",
+          "team_id": "TEAM-E0546F1BD883",
+          "member_id": "MEM-EA94B06D31EE",
+          "shift_type": "morning",
+          "schedule_date": "2026-06-17",
+          "start_time": "08:00",
+          "end_time": "16:00",
+          "escalation_level": 1,
+          "note": "",
+          "created_at": "2026-06-17 14:40:54",
+          "updated_at": "2026-06-17 14:40:54"
+        },
+        {
+          "schedule_id": "SCHED-CCE23C01F46A",
+          "team_id": "TEAM-E0546F1BD883",
+          "member_id": "MEM-3F8D9FD197E5",
+          "shift_type": "afternoon",
+          "schedule_date": "2026-06-17",
+          "start_time": "16:00",
+          "end_time": "00:00",
+          "escalation_level": 1,
+          "note": "",
+          "created_at": "2026-06-17 14:40:28",
+          "updated_at": "2026-06-17 14:40:28"
+        }
+      ],
+      "handovers": [],
+      "escalation_logs": [
+        {
+          "log_id": "LOG-C6D1669BA5C5",
+          "event_id": "EVT-SEQ-001",
+          "event_title": "disk alert",
+          "team_id": "TEAM-E0546F1BD883",
+          "schedule_id": "SCHED-711E056B3018",
+          "member_id": "MEM-EA94B06D31EE",
+          "escalation_level": 1,
+          "event_time": "2026-06-17 09:30:00",
+          "hit_time": "2026-06-17 14:41:36",
+          "status": "pending",
+          "handover_note": "review log",
+          "acknowledged_at": null,
+          "escalated_to": null,
+          "escalated_at": null,
+          "resolved_at": null,
+          "note": "",
+          "created_at": "2026-06-17 14:41:36",
+          "updated_at": "2026-06-17 14:41:36"
+        }
+      ],
+      "escalation_levels": [
+        {
+          "level_id": "ESC-E9986FAE3097",
+          "team_id": "TEAM-E0546F1BD883",
+          "level": 1,
+          "name": "L1",
+          "response_minutes": 30,
+          "escalation_minutes": 60,
+          "created_at": "2026-06-17 14:40:28"
+        },
+        {
+          "level_id": "ESC-ED009D7407A0",
+          "team_id": "TEAM-E0546F1BD883",
+          "level": 2,
+          "name": "L2",
+          "response_minutes": 60,
+          "escalation_minutes": 120,
+          "created_at": "2026-06-17 14:40:28"
+        }
+      ],
+      "time_windows": [],
+      "meta": {
+        "generated_at": "2026-06-17 14:41:46",
+        "cli_version": "1.0"
+      }
+    }
+  }
+]

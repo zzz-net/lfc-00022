@@ -1,9 +1,9 @@
-validation:
-  device_id_pattern: "^DEV-[A-Z0-9]{3,10}$"
+﻿validation:
+  device_id_pattern: '^DEV-[A-Z0-9]{3,10}$'
   time_formats:
-    - "%Y-%m-%d %H:%M:%S"
-    - "%Y-%m-%dT%H:%M:%S"
-    - "%Y/%m/%d %H:%M:%S"
+    - '%Y-%m-%d %H:%M:%S'
+    - '%Y-%m-%dT%H:%M:%S'
+    - '%Y/%m/%d %H:%M:%S'
   valid_issue_types:
     - temperature
     - pressure
@@ -50,59 +50,49 @@ batch:
     - issue_type
     - handler
     - note
-  conflict_strategy: "skip"
+  conflict_strategy: skip
   log_retention_days: 30
-
-ticket:
-  valid_priorities:
-    - critical
-    - high
-    - medium
-    - low
-  default_priority: "medium"
-  assignable_users: []
 
 duty:
   available_teams:
-    - "运维一班"
-    - "运维二班"
-    - "运维三班"
+    - Alpha
+    - Beta
   max_escalation_levels: 3
   handover_allowed_roles:
-    - "leader"
-    - "manager"
+    - leader
+    - manager
   default_rollback_window_hours: 24
   log_retention_days: 90
   valid_roles:
-    - "leader"
-    - "engineer"
-    - "operator"
-    - "manager"
+    - leader
+    - engineer
+    - operator
+    - manager
   valid_shifts:
-    - "morning"
-    - "afternoon"
-    - "night"
-    - "day"
-    - "custom"
+    - morning
+    - afternoon
+    - night
+    - day
+    - custom
 
 snapshot:
   exportable_teams:
-    - "运维一班"
-    - "运维二班"
-    - "运维三班"
+    - Alpha
+    - Beta
   allow_rollback: true
   max_retention_per_team: 100
   require_team_for_generation: true
   allow_generate_after_handover: false
   log_retention_days: 180
   allowed_export_roles:
-    - "leader"
-    - "manager"
+    - leader
+    - manager
   allowed_generate_roles:
-    - "leader"
-    - "manager"
-    - "engineer"
+    - leader
+    - manager
+    - engineer
   allowed_import_roles:
-    - "manager"
+    - manager
 
-db_path: "inspection.db"
+db_path: 'D:/workSpace/AI__SPACE/lfc-00022/.review_tmp/snapshot_review_seq.db'
+

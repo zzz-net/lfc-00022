@@ -2755,3 +2755,688 @@ def _add_duty_methods(db_class):
 
 
 Database = _add_duty_methods(Database)
+
+
+# ==================== 值班对账快照模块 ====================
+
+SNAPSHOT_STATUS_ACTIVE = "active"
+SNAPSHOT_STATUS_DELETED = "deleted"
+SNAPSHOT_STATUS_IMPORTED = "imported"
+SNAPSHOT_STATUS_ROLLED_BACK = "rolled_back"
+
+SNAPSHOT_OP_GENERATE = "generate"
+SNAPSHOT_OP_EXPORT = "export"
+SNAPSHOT_OP_IMPORT = "import"
+SNAPSHOT_OP_ROLLBACK = "rollback"
+SNAPSHOT_OP_DELETE = "delete"
+SNAPSHOT_OP_DIFF = "diff"
+
+VALID_SNAPSHOT_OPERATIONS = {
+    SNAPSHOT_OP_GENERATE, SNAPSHOT_OP_EXPORT, SNAPSHOT_OP_IMPORT,
+    SNAPSHOT_OP_ROLLBACK, SNAPSHOT_OP_DELETE, SNAPSHOT_OP_DIFF,
+}
+
+SNAPSHOT_IMPORT_STATUS_SUCCESS = "success"
+SNAPSHOT_IMPORT_STATUS_PARTIAL = "partial"
+SNAPSHOT_IMPORT_STATUS_FAILED = "failed"
+
+
+@dataclass
+class DutySnapshot:
+    """值班对账快照"""
+    id: str
+    team_id: str
+    team_name: str
+    snapshot_date: str
+    snapshot_point: str
+    operator: str
+    status: str = SNAPSHOT_STATUS_ACTIVE
+    note: str = ""
+    source: str = "manual"
+    checksum: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "snapshot_id": self.id,
+            "team_id": self.team_id,
+            "team_name": self.team_name,
+            "snapshot_date": self.snapshot_date,
+            "snapshot_point": self.snapshot_point,
+            "operator": self.operator,
+            "status": self.status,
+            "note": self.note,
+            "source": self.source,
+            "checksum": self.checksum,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+    def to_export_dict(self) -> dict[str, Any]:
+        return {
+            "snapshot_id": self.id,
+            "team_id": self.team_id,
+            "team_name": self.team_name,
+            "snapshot_date": self.snapshot_date,
+            "snapshot_point": self.snapshot_point,
+            "operator": self.operator,
+            "status": self.status,
+            "note": self.note,
+            "source": self.source,
+            "checksum": self.checksum,
+            "created_at": self.created_at,
+        }
+
+
+@dataclass
+class DutySnapshotContent:
+    """快照内容（JSON序列化存储）"""
+    snapshot_id: str
+    team_info: dict[str, Any] = field(default_factory=dict)
+    members: list[dict[str, Any]] = field(default_factory=list)
+    schedules: list[dict[str, Any]] = field(default_factory=list)
+    handovers: list[dict[str, Any]] = field(default_factory=list)
+    escalation_logs: list[dict[str, Any]] = field(default_factory=list)
+    escalation_levels: list[dict[str, Any]] = field(default_factory=list)
+    time_windows: list[dict[str, Any]] = field(default_factory=list)
+    meta: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "snapshot_id": self.snapshot_id,
+            "team_info": self.team_info,
+            "members": self.members,
+            "schedules": self.schedules,
+            "handovers": self.handovers,
+            "escalation_logs": self.escalation_logs,
+            "escalation_levels": self.escalation_levels,
+            "time_windows": self.time_windows,
+            "meta": self.meta,
+        }
+
+
+@dataclass
+class DutySnapshotDiff:
+    """两份快照的差异结果"""
+    id: str
+    snapshot_a_id: str
+    snapshot_b_id: str
+    team_id: str
+    operator: str
+    diff_summary_json: str = "{}"
+    diff_detail_json: str = "{}"
+    has_conflicts: bool = False
+    created_at: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        import json
+        return {
+            "diff_id": self.id,
+            "snapshot_a_id": self.snapshot_a_id,
+            "snapshot_b_id": self.snapshot_b_id,
+            "team_id": self.team_id,
+            "operator": self.operator,
+            "summary": json.loads(self.diff_summary_json) if self.diff_summary_json else {},
+            "detail": json.loads(self.diff_detail_json) if self.diff_detail_json else {},
+            "has_conflicts": self.has_conflicts,
+            "created_at": self.created_at,
+        }
+
+
+@dataclass
+class DutySnapshotLog:
+    """快照操作日志"""
+    id: str
+    operation: str
+    operator: str
+    team_id: str = ""
+    snapshot_id: str = ""
+    diff_id: str = ""
+    status: str = ""
+    detail: str = ""
+    error_message: str = ""
+    import_file: str = ""
+    export_file: str = ""
+    created_at: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "log_id": self.id,
+            "operation": self.operation,
+            "operator": self.operator,
+            "team_id": self.team_id,
+            "snapshot_id": self.snapshot_id,
+            "diff_id": self.diff_id,
+            "status": self.status,
+            "detail": self.detail,
+            "error_message": self.error_message,
+            "import_file": self.import_file,
+            "export_file": self.export_file,
+            "created_at": self.created_at,
+        }
+
+
+def _init_duty_snapshot_tables(conn: sqlite3.Connection) -> None:
+    """初始化值班对账快照相关表"""
+    statements = [
+        """CREATE TABLE IF NOT EXISTS duty_snapshots (
+            id TEXT PRIMARY KEY,
+            team_id TEXT NOT NULL,
+            team_name TEXT NOT NULL,
+            snapshot_date TEXT NOT NULL,
+            snapshot_point TEXT NOT NULL,
+            operator TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            note TEXT DEFAULT '',
+            source TEXT DEFAULT 'manual',
+            checksum TEXT DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_duty_snapshot_team_date ON duty_snapshots(team_id, snapshot_date)",
+        "CREATE INDEX IF NOT EXISTS idx_duty_snapshot_status ON duty_snapshots(status)",
+        "CREATE INDEX IF NOT EXISTS idx_duty_snapshot_created ON duty_snapshots(created_at DESC)",
+        """CREATE UNIQUE INDEX IF NOT EXISTS idx_duty_snapshot_unique
+            ON duty_snapshots(team_id, snapshot_date, snapshot_point)
+            WHERE status NOT IN ('deleted', 'rolled_back')""",
+        """CREATE TABLE IF NOT EXISTS duty_snapshot_contents (
+            snapshot_id TEXT PRIMARY KEY,
+            team_info_json TEXT DEFAULT '{}',
+            members_json TEXT DEFAULT '[]',
+            schedules_json TEXT DEFAULT '[]',
+            handovers_json TEXT DEFAULT '[]',
+            escalation_logs_json TEXT DEFAULT '[]',
+            escalation_levels_json TEXT DEFAULT '[]',
+            time_windows_json TEXT DEFAULT '[]',
+            meta_json TEXT DEFAULT '{}',
+            created_at TEXT NOT NULL
+        )""",
+        """CREATE TABLE IF NOT EXISTS duty_snapshot_diffs (
+            id TEXT PRIMARY KEY,
+            snapshot_a_id TEXT NOT NULL,
+            snapshot_b_id TEXT NOT NULL,
+            team_id TEXT NOT NULL,
+            operator TEXT NOT NULL,
+            diff_summary_json TEXT DEFAULT '{}',
+            diff_detail_json TEXT DEFAULT '{}',
+            has_conflicts INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_duty_snapshot_diff_team ON duty_snapshot_diffs(team_id)",
+        "CREATE INDEX IF NOT EXISTS idx_duty_snapshot_diff_created ON duty_snapshot_diffs(created_at DESC)",
+        """CREATE TABLE IF NOT EXISTS duty_snapshot_logs (
+            id TEXT PRIMARY KEY,
+            operation TEXT NOT NULL,
+            operator TEXT NOT NULL,
+            team_id TEXT DEFAULT '',
+            snapshot_id TEXT DEFAULT '',
+            diff_id TEXT DEFAULT '',
+            status TEXT DEFAULT '',
+            detail TEXT DEFAULT '',
+            error_message TEXT DEFAULT '',
+            import_file TEXT DEFAULT '',
+            export_file TEXT DEFAULT '',
+            created_at TEXT NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_duty_snapshot_log_op ON duty_snapshot_logs(operation)",
+        "CREATE INDEX IF NOT EXISTS idx_duty_snapshot_log_created ON duty_snapshot_logs(created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_duty_snapshot_log_team ON duty_snapshot_logs(team_id)",
+    ]
+    for stmt in statements:
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError:
+            pass
+
+
+def _ensure_snapshot_tables(db: "Database") -> None:
+    """确保快照表存在"""
+    with db._conn() as conn:
+        _init_duty_snapshot_tables(conn)
+
+
+def _add_snapshot_tables_to_init(db_class):
+    """将快照表初始化添加到 Database._init_db 中"""
+    original_init = db_class._init_db
+
+    def new_init_db(self):
+        original_init(self)
+        with self._conn() as conn:
+            _init_duty_snapshot_tables(conn)
+
+    db_class._init_db = new_init_db
+    return db_class
+
+
+Database = _add_snapshot_tables_to_init(Database)
+
+
+def _generate_snapshot_id(prefix: str) -> str:
+    """生成快照相关ID"""
+    return prefix + uuid.uuid4().hex[:12].upper()
+
+
+def _add_snapshot_methods(db_class):
+    """将快照相关方法添加到 Database 类中"""
+    import json as _json
+
+    # ============ Snapshot 操作 ============
+
+    def insert_duty_snapshot(self, snapshot: DutySnapshot,
+                             content: DutySnapshotContent | None = None) -> None:
+        """插入快照及其内容"""
+        _ensure_snapshot_tables(self)
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO duty_snapshots
+                   (id, team_id, team_name, snapshot_date, snapshot_point,
+                    operator, status, note, source, checksum, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (snapshot.id, snapshot.team_id, snapshot.team_name,
+                 snapshot.snapshot_date, snapshot.snapshot_point,
+                 snapshot.operator, snapshot.status, snapshot.note,
+                 snapshot.source, snapshot.checksum,
+                 snapshot.created_at, snapshot.updated_at)
+            )
+            if content is not None:
+                conn.execute(
+                    """INSERT INTO duty_snapshot_contents
+                       (snapshot_id, team_info_json, members_json, schedules_json,
+                        handovers_json, escalation_logs_json, escalation_levels_json,
+                        time_windows_json, meta_json, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (content.snapshot_id,
+                     _json.dumps(content.team_info, ensure_ascii=False),
+                     _json.dumps(content.members, ensure_ascii=False),
+                     _json.dumps(content.schedules, ensure_ascii=False),
+                     _json.dumps(content.handovers, ensure_ascii=False),
+                     _json.dumps(content.escalation_logs, ensure_ascii=False),
+                     _json.dumps(content.escalation_levels, ensure_ascii=False),
+                     _json.dumps(content.time_windows, ensure_ascii=False),
+                     _json.dumps(content.meta, ensure_ascii=False),
+                     snapshot.created_at)
+                )
+
+    def update_duty_snapshot(self, snapshot: DutySnapshot) -> None:
+        """更新快照元数据"""
+        _ensure_snapshot_tables(self)
+        with self._conn() as conn:
+            conn.execute(
+                """UPDATE duty_snapshots SET
+                   team_id=?, team_name=?, snapshot_date=?, snapshot_point=?,
+                   operator=?, status=?, note=?, source=?, checksum=?, updated_at=?
+                   WHERE id=?""",
+                (snapshot.team_id, snapshot.team_name, snapshot.snapshot_date,
+                 snapshot.snapshot_point, snapshot.operator, snapshot.status,
+                 snapshot.note, snapshot.source, snapshot.checksum,
+                 snapshot.updated_at, snapshot.id)
+            )
+
+    def get_duty_snapshot(self, snapshot_id: str) -> Optional[DutySnapshot]:
+        """按ID获取快照"""
+        _ensure_snapshot_tables(self)
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM duty_snapshots WHERE id = ?", (snapshot_id,)
+            ).fetchone()
+            if not row:
+                return None
+            return DutySnapshot(**dict(row))
+
+    def get_duty_snapshot_content(self, snapshot_id: str) -> Optional[DutySnapshotContent]:
+        """获取快照内容"""
+        _ensure_snapshot_tables(self)
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM duty_snapshot_contents WHERE snapshot_id = ?",
+                (snapshot_id,)
+            ).fetchone()
+            if not row:
+                return None
+            d = dict(row)
+            return DutySnapshotContent(
+                snapshot_id=d["snapshot_id"],
+                team_info=_json.loads(d["team_info_json"]) if d["team_info_json"] else {},
+                members=_json.loads(d["members_json"]) if d["members_json"] else [],
+                schedules=_json.loads(d["schedules_json"]) if d["schedules_json"] else [],
+                handovers=_json.loads(d["handovers_json"]) if d["handovers_json"] else [],
+                escalation_logs=_json.loads(d["escalation_logs_json"]) if d["escalation_logs_json"] else [],
+                escalation_levels=_json.loads(d["escalation_levels_json"]) if d["escalation_levels_json"] else [],
+                time_windows=_json.loads(d["time_windows_json"]) if d["time_windows_json"] else [],
+                meta=_json.loads(d["meta_json"]) if d["meta_json"] else {},
+            )
+
+    def filter_duty_snapshots(self, team_id: str | None = None,
+                               snapshot_date: str | None = None,
+                               date_from: str | None = None,
+                               date_to: str | None = None,
+                               operator: str | None = None,
+                               status: str | None = None,
+                               limit: int | None = None) -> list[DutySnapshot]:
+        """按条件过滤快照"""
+        _ensure_snapshot_tables(self)
+        conditions: list[str] = []
+        params: list[Any] = []
+
+        if team_id:
+            conditions.append("team_id = ?")
+            params.append(team_id)
+        if snapshot_date:
+            conditions.append("snapshot_date = ?")
+            params.append(snapshot_date)
+        if date_from:
+            conditions.append("snapshot_date >= ?")
+            params.append(date_from)
+        if date_to:
+            conditions.append("snapshot_date <= ?")
+            params.append(date_to)
+        if operator:
+            conditions.append("operator = ?")
+            params.append(operator)
+        if status:
+            conditions.append("status = ?")
+            params.append(status)
+
+        where_clause = ""
+        if conditions:
+            where_clause = "WHERE " + " AND ".join(conditions)
+
+        sql = f"""SELECT * FROM duty_snapshots {where_clause}
+                  ORDER BY created_at DESC"""
+        if limit:
+            sql += f" LIMIT {int(limit)}"
+
+        with self._conn() as conn:
+            rows = conn.execute(sql, params).fetchall()
+            return [DutySnapshot(**dict(r)) for r in rows]
+
+    def get_snapshots_by_team(self, team_id: str,
+                               limit: int | None = None) -> list[DutySnapshot]:
+        """获取班组的所有快照"""
+        return self.filter_duty_snapshots(team_id=team_id, limit=limit)
+
+    def get_snapshots_by_date(self, snapshot_date: str,
+                               team_id: str | None = None,
+                               limit: int | None = None) -> list[DutySnapshot]:
+        """按日期获取快照"""
+        return self.filter_duty_snapshots(
+            team_id=team_id, snapshot_date=snapshot_date, limit=limit
+        )
+
+    def duty_snapshot_exists(self, snapshot_id: str) -> bool:
+        """检查快照是否存在"""
+        _ensure_snapshot_tables(self)
+        with self._conn() as conn:
+            cur = conn.execute(
+                "SELECT COUNT(*) FROM duty_snapshots WHERE id = ?", (snapshot_id,)
+            )
+            return cur.fetchone()[0] > 0
+
+    def duty_snapshot_unique_exists(self, team_id: str, snapshot_date: str,
+                                     snapshot_point: str) -> bool:
+        """检查唯一约束的快照是否存在"""
+        _ensure_snapshot_tables(self)
+        with self._conn() as conn:
+            cur = conn.execute(
+                """SELECT COUNT(*) FROM duty_snapshots
+                   WHERE team_id = ? AND snapshot_date = ? AND snapshot_point = ?
+                   AND status != 'deleted'""",
+                (team_id, snapshot_date, snapshot_point)
+            )
+            return cur.fetchone()[0] > 0
+
+    def count_team_snapshots(self, team_id: str, status: str | None = None) -> int:
+        """统计班组的快照数量"""
+        _ensure_snapshot_tables(self)
+        conditions = ["team_id = ?"]
+        params: list[Any] = [team_id]
+        if status:
+            conditions.append("status = ?")
+            params.append(status)
+        where = " AND ".join(conditions)
+        with self._conn() as conn:
+            cur = conn.execute(
+                f"SELECT COUNT(*) FROM duty_snapshots WHERE {where}", params
+            )
+            return cur.fetchone()[0]
+
+    def delete_oldest_snapshots(self, team_id: str, keep_count: int) -> int:
+        """删除超出保留份数的最旧快照（软删除）"""
+        _ensure_snapshot_tables(self)
+        if keep_count <= 0:
+            return 0
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT id FROM duty_snapshots
+                   WHERE team_id = ? AND status = 'active'
+                   ORDER BY created_at DESC""",
+                (team_id,)
+            ).fetchall()
+            if len(rows) <= keep_count:
+                return 0
+            to_delete = [r[0] for r in rows[keep_count:]]
+            if not to_delete:
+                return 0
+            placeholders = ",".join(["?"] * len(to_delete))
+            conn.execute(
+                f"""UPDATE duty_snapshots SET status = 'deleted', updated_at = ?
+                    WHERE id IN ({placeholders})""",
+                [now] + to_delete
+            )
+            return len(to_delete)
+
+    def delete_duty_snapshot(self, snapshot_id: str, operator: str = "") -> bool:
+        """软删除快照"""
+        _ensure_snapshot_tables(self)
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if not operator:
+            snap = self.get_duty_snapshot(snapshot_id)
+            if snap:
+                operator = snap.operator
+        with self._conn() as conn:
+            cur = conn.execute(
+                """UPDATE duty_snapshots SET status = 'deleted', operator = ?, updated_at = ?
+                   WHERE id = ? AND status != 'deleted'""",
+                (operator, now, snapshot_id)
+            )
+            return cur.rowcount > 0
+
+    # ============ Snapshot Diff 操作 ============
+
+    def insert_duty_snapshot_diff(self, diff: DutySnapshotDiff) -> None:
+        """插入快照差异记录"""
+        _ensure_snapshot_tables(self)
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO duty_snapshot_diffs
+                   (id, snapshot_a_id, snapshot_b_id, team_id, operator,
+                    diff_summary_json, diff_detail_json, has_conflicts, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (diff.id, diff.snapshot_a_id, diff.snapshot_b_id, diff.team_id,
+                 diff.operator, diff.diff_summary_json, diff.diff_detail_json,
+                 1 if diff.has_conflicts else 0, diff.created_at)
+            )
+
+    def get_duty_snapshot_diff(self, diff_id: str) -> Optional[DutySnapshotDiff]:
+        """按ID获取差异记录"""
+        _ensure_snapshot_tables(self)
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM duty_snapshot_diffs WHERE id = ?", (diff_id,)
+            ).fetchone()
+            if not row:
+                return None
+            d = dict(row)
+            return DutySnapshotDiff(
+                id=d["id"],
+                snapshot_a_id=d["snapshot_a_id"],
+                snapshot_b_id=d["snapshot_b_id"],
+                team_id=d["team_id"],
+                operator=d["operator"],
+                diff_summary_json=d["diff_summary_json"],
+                diff_detail_json=d["diff_detail_json"],
+                has_conflicts=bool(d["has_conflicts"]),
+                created_at=d["created_at"],
+            )
+
+    def list_snapshot_diffs(self, team_id: str | None = None,
+                             snapshot_id: str | None = None,
+                             limit: int = 20) -> list[DutySnapshotDiff]:
+        """列出差异记录"""
+        _ensure_snapshot_tables(self)
+        conditions: list[str] = []
+        params: list[Any] = []
+        if team_id:
+            conditions.append("team_id = ?")
+            params.append(team_id)
+        if snapshot_id:
+            conditions.append("(snapshot_a_id = ? OR snapshot_b_id = ?)")
+            params.extend([snapshot_id, snapshot_id])
+        where = ""
+        if conditions:
+            where = "WHERE " + " AND ".join(conditions)
+        sql = f"""SELECT * FROM duty_snapshot_diffs {where}
+                  ORDER BY created_at DESC LIMIT ?"""
+        params.append(limit)
+        with self._conn() as conn:
+            rows = conn.execute(sql, params).fetchall()
+            result: list[DutySnapshotDiff] = []
+            for r in rows:
+                d = dict(r)
+                result.append(DutySnapshotDiff(
+                    id=d["id"],
+                    snapshot_a_id=d["snapshot_a_id"],
+                    snapshot_b_id=d["snapshot_b_id"],
+                    team_id=d["team_id"],
+                    operator=d["operator"],
+                    diff_summary_json=d["diff_summary_json"],
+                    diff_detail_json=d["diff_detail_json"],
+                    has_conflicts=bool(d["has_conflicts"]),
+                    created_at=d["created_at"],
+                ))
+            return result
+
+    # ============ Snapshot Log 操作 ============
+
+    def insert_duty_snapshot_log(self, log: DutySnapshotLog) -> None:
+        """插入操作日志"""
+        _ensure_snapshot_tables(self)
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO duty_snapshot_logs
+                   (id, operation, operator, team_id, snapshot_id, diff_id,
+                    status, detail, error_message, import_file, export_file, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (log.id, log.operation, log.operator, log.team_id, log.snapshot_id,
+                 log.diff_id, log.status, log.detail, log.error_message,
+                 log.import_file, log.export_file, log.created_at)
+            )
+
+    def list_snapshot_logs(self, team_id: str | None = None,
+                            operation: str | None = None,
+                            operator: str | None = None,
+                            limit: int = 50) -> list[DutySnapshotLog]:
+        """列出操作日志"""
+        _ensure_snapshot_tables(self)
+        conditions: list[str] = []
+        params: list[Any] = []
+        if team_id:
+            conditions.append("team_id = ?")
+            params.append(team_id)
+        if operation:
+            conditions.append("operation = ?")
+            params.append(operation)
+        if operator:
+            conditions.append("operator = ?")
+            params.append(operator)
+        where = ""
+        if conditions:
+            where = "WHERE " + " AND ".join(conditions)
+        sql = f"""SELECT * FROM duty_snapshot_logs {where}
+                  ORDER BY created_at DESC LIMIT ?"""
+        params.append(limit)
+        with self._conn() as conn:
+            rows = conn.execute(sql, params).fetchall()
+            return [DutySnapshotLog(**dict(r)) for r in rows]
+
+    def get_snapshot_log(self, log_id: str) -> Optional[DutySnapshotLog]:
+        """按ID获取操作日志"""
+        _ensure_snapshot_tables(self)
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM duty_snapshot_logs WHERE id = ?", (log_id,)
+            ).fetchone()
+            if not row:
+                return None
+            return DutySnapshotLog(**dict(row))
+
+    def get_last_failed_import_log(self, team_id: str | None = None) -> Optional[DutySnapshotLog]:
+        """获取最近一次失败或部分成功的导入日志（用于回滚）"""
+        _ensure_snapshot_tables(self)
+        conditions = [
+            "operation = ?",
+            "status IN (?, ?)",
+        ]
+        params: list[Any] = [
+            SNAPSHOT_OP_IMPORT,
+            SNAPSHOT_IMPORT_STATUS_FAILED,
+            SNAPSHOT_IMPORT_STATUS_PARTIAL,
+        ]
+        if team_id:
+            conditions.append("team_id = ?")
+            params.append(team_id)
+        where = "WHERE " + " AND ".join(conditions)
+        with self._conn() as conn:
+            row = conn.execute(
+                f"""SELECT * FROM duty_snapshot_logs {where}
+                    ORDER BY created_at DESC LIMIT 1""",
+                params
+            ).fetchone()
+            if not row:
+                return None
+            return DutySnapshotLog(**dict(row))
+
+    def cleanup_old_snapshot_logs(self, days: int) -> int:
+        """清理N天前的操作日志"""
+        if days <= 0:
+            return 0
+        from datetime import timedelta as _td
+        cutoff = (datetime.now() - _td(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+        with self._conn() as conn:
+            cur = conn.execute(
+                "DELETE FROM duty_snapshot_logs WHERE created_at < ?",
+                (cutoff,)
+            )
+            return cur.rowcount
+
+    # ============ 绑定到类 ============
+
+    db_class.insert_duty_snapshot = insert_duty_snapshot
+    db_class.update_duty_snapshot = update_duty_snapshot
+    db_class.get_duty_snapshot = get_duty_snapshot
+    db_class.get_duty_snapshot_content = get_duty_snapshot_content
+    db_class.filter_duty_snapshots = filter_duty_snapshots
+    db_class.get_snapshots_by_team = get_snapshots_by_team
+    db_class.get_snapshots_by_date = get_snapshots_by_date
+    db_class.duty_snapshot_exists = duty_snapshot_exists
+    db_class.duty_snapshot_unique_exists = duty_snapshot_unique_exists
+    db_class.count_team_snapshots = count_team_snapshots
+    db_class.delete_oldest_snapshots = delete_oldest_snapshots
+    db_class.delete_duty_snapshot = delete_duty_snapshot
+
+    db_class.insert_duty_snapshot_diff = insert_duty_snapshot_diff
+    db_class.get_duty_snapshot_diff = get_duty_snapshot_diff
+    db_class.list_snapshot_diffs = list_snapshot_diffs
+
+    db_class.insert_duty_snapshot_log = insert_duty_snapshot_log
+    db_class.list_snapshot_logs = list_snapshot_logs
+    db_class.get_snapshot_log = get_snapshot_log
+    db_class.get_last_failed_import_log = get_last_failed_import_log
+    db_class.cleanup_old_snapshot_logs = cleanup_old_snapshot_logs
+
+    return db_class
+
+
+Database = _add_snapshot_methods(Database)
