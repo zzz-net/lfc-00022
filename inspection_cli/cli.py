@@ -25,6 +25,14 @@ from .templates import (
     TemplateError, TemplateImportError, TemplateManager,
     TemplateVersionError,
 )
+from .ticket import TicketManager, TicketError, TicketConflictError
+from .ticket_io import TicketIOManager
+from .database import (
+    VALID_TICKET_STATUSES, TICKET_STATUS_LABELS,
+    TICKET_IMPORT_CONFLICT_SKIP, TICKET_IMPORT_CONFLICT_ABORT,
+    TICKET_IMPORT_CONFLICT_FORCE, VALID_TICKET_IMPORT_CONFLICT_STRATEGIES,
+    DEFAULT_TICKET_PRIORITIES,
+)
 
 
 class CliContext:
@@ -45,6 +53,8 @@ class CliContext:
         self.batch_manager = BatchOperationManager(self.db, self.config)
         self.exporter = Exporter(self.db, self.config)
         self.template_manager = TemplateManager(self.db, self.config)
+        self.ticket_manager = TicketManager(self.db, self.config)
+        self.ticket_io_manager = TicketIOManager(self.db, self.config, self.ticket_manager)
 
 
 pass_ctx = click.make_pass_decorator(CliContext)
@@ -786,6 +796,285 @@ def cmd_batch_annotate(ctx: CliContext, event_ids, device_ids, statuses,
     except BatchOperationError as e:
         click.echo(f"错误: {e}", err=True)
         sys.exit(1)
+
+
+# ============ 工单相关命令 ============
+
+@main.command("ticket-create", help="创建处置工单（支持单个事件或批量筛选结果）")
+@click.option("-t", "--title", required=True, help="工单标题")
+@click.option("-H", "--creator", required=True, help="创建人")
+@click.option("-d", "--description", default="", help="工单描述")
+@click.option("-p", "--priority", default=None,
+              help=f"优先级，默认使用配置中的默认优先级")
+@click.option("-a", "--assignee", default="", help="负责人（领取人）")
+@click.option("--due-time", default="", help="截止时间 (YYYY-MM-DD HH:MM:SS)")
+@click.option("--steps", default="", help="处理步骤")
+@click.option("-n", "--note", default="", help="备注")
+@click.option("--event-ids", callback=_parse_csv_list, default=None,
+              help="关联的事件ID，多个用逗号分隔")
+@click.option("--device-ids", callback=_parse_csv_list, default=None,
+              help="按设备筛选事件来创建工单")
+@click.option("--statuses", callback=_parse_csv_list, default=None,
+              help="按状态筛选事件来创建工单")
+@click.option("--yes", "-y", is_flag=True, default=False,
+              help="跳过确认直接创建")
+@pass_ctx
+def cmd_ticket_create(ctx: CliContext, title: str, creator: str,
+                      description: str, priority: str | None, assignee: str,
+                      due_time: str, steps: str, note: str,
+                      event_ids: list[str] | None,
+                      device_ids: list[str] | None,
+                      statuses: list[str] | None,
+                      yes: bool) -> None:
+    """创建工单"""
+    selected_event_ids: list[str] = []
+
+    if event_ids:
+        selected_event_ids.extend(event_ids)
+
+    if device_ids or statuses:
+        from .batch import BatchFilter
+        bf = BatchFilter(
+            device_ids=device_ids,
+            statuses=statuses,
+        )
+        filtered_events = ctx.batch_manager.preview(bf)
+        if filtered_events:
+            for ev in filtered_events:
+                if ev.id not in selected_event_ids:
+                    selected_event_ids.append(ev.id)
+
+    if not selected_event_ids and not yes:
+        click.echo("未指定关联事件，将创建不关联事件的工单。")
+        if not click.confirm("确认创建？", default=False):
+            click.echo("已取消。")
+            return
+
+    try:
+        result = ctx.ticket_manager.create_ticket(
+            title=title,
+            creator=creator,
+            event_ids=selected_event_ids or None,
+            description=description,
+            priority=priority,
+            assignee=assignee,
+            due_time=due_time,
+            steps=steps,
+            note=note,
+        )
+        click.echo(result.formatted())
+    except TicketConflictError as e:
+        click.echo(f"冲突: {e}", err=True)
+        sys.exit(1)
+    except TicketError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("ticket-list", help="列出工单（支持按状态、优先级、负责人筛选）")
+@click.option("--statuses", callback=_parse_csv_list, default=None,
+              help="按状态筛选，多个用逗号分隔")
+@click.option("--priorities", callback=_parse_csv_list, default=None,
+              help="按优先级筛选，多个用逗号分隔")
+@click.option("--assignees", callback=_parse_csv_list, default=None,
+              help="按负责人筛选，多个用逗号分隔")
+@click.option("--creators", callback=_parse_csv_list, default=None,
+              help="按创建人筛选，多个用逗号分隔")
+@pass_ctx
+def cmd_ticket_list(ctx: CliContext, statuses, priorities, assignees, creators) -> None:
+    """列出工单"""
+    result = ctx.ticket_manager.list_tickets(
+        statuses=statuses,
+        priorities=priorities,
+        assignees=assignees,
+        creators=creators,
+    )
+    click.echo(result.formatted())
+
+
+@main.command("ticket-show", help="查看工单详情（含关联事件和流转日志）")
+@click.argument("ticket_id")
+@pass_ctx
+def cmd_ticket_show(ctx: CliContext, ticket_id: str) -> None:
+    """查看工单详情"""
+    try:
+        result = ctx.ticket_manager.get_ticket_detail(ticket_id)
+        click.echo(result.formatted())
+    except TicketError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("ticket-claim", help="领取工单")
+@click.argument("ticket_id")
+@click.option("-H", "--operator", required=True, help="领取人")
+@click.option("-n", "--note", default="", help="备注")
+@pass_ctx
+def cmd_ticket_claim(ctx: CliContext, ticket_id: str, operator: str, note: str) -> None:
+    """领取工单"""
+    try:
+        result = ctx.ticket_manager.claim_ticket(
+            ticket_id=ticket_id,
+            operator=operator,
+            note=note,
+        )
+        click.echo(result.formatted())
+    except TicketError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("ticket-assign", help="转派工单给其他负责人")
+@click.argument("ticket_id")
+@click.argument("new_assignee")
+@click.option("-H", "--operator", required=True, help="操作人")
+@click.option("-n", "--note", default="", help="转派原因")
+@pass_ctx
+def cmd_ticket_assign(ctx: CliContext, ticket_id: str, new_assignee: str,
+                      operator: str, note: str) -> None:
+    """转派工单"""
+    try:
+        result = ctx.ticket_manager.assign_ticket(
+            ticket_id=ticket_id,
+            new_assignee=new_assignee,
+            operator=operator,
+            note=note,
+        )
+        click.echo(result.formatted())
+    except TicketError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("ticket-complete", help="完成工单")
+@click.argument("ticket_id")
+@click.option("-H", "--operator", required=True, help="操作人")
+@click.option("-n", "--note", default="", help="完成说明")
+@pass_ctx
+def cmd_ticket_complete(ctx: CliContext, ticket_id: str, operator: str, note: str) -> None:
+    """完成工单"""
+    try:
+        result = ctx.ticket_manager.complete_ticket(
+            ticket_id=ticket_id,
+            operator=operator,
+            note=note,
+        )
+        click.echo(result.formatted())
+    except TicketError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("ticket-revoke", help="撤回工单")
+@click.argument("ticket_id")
+@click.option("-H", "--operator", required=True, help="操作人")
+@click.option("-n", "--note", default="", help="撤回原因")
+@click.option("--yes", "-y", is_flag=True, default=False,
+              help="跳过确认直接撤回")
+@pass_ctx
+def cmd_ticket_revoke(ctx: CliContext, ticket_id: str, operator: str,
+                      note: str, yes: bool) -> None:
+    """撤回工单"""
+    if not yes:
+        click.echo(f"将撤回工单 {ticket_id}。撤回后工单将无法继续处理。")
+        if not click.confirm("确认撤回？", default=False):
+            click.echo("已取消。")
+            return
+
+    try:
+        result = ctx.ticket_manager.revoke_ticket(
+            ticket_id=ticket_id,
+            operator=operator,
+            note=note,
+        )
+        click.echo(result.formatted())
+    except TicketError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("ticket-export", help="导出工单列表（CSV/JSON）")
+@click.argument("output_path", type=click.Path(dir_okay=False))
+@click.option("-f", "--format", "fmt",
+              type=click.Choice(["csv", "json"], case_sensitive=False),
+              default=None, help="导出格式（默认按文件后缀推断）")
+@click.option("--with-logs", is_flag=True, default=False,
+              help="JSON 导出时包含流转日志")
+@click.option("--with-events", is_flag=True, default=False,
+              help="JSON 导出时包含关联事件ID")
+@pass_ctx
+def cmd_ticket_export(ctx: CliContext, output_path: str, fmt: str | None,
+                      with_logs: bool, with_events: bool) -> None:
+    """导出工单"""
+    if fmt:
+        fmt = fmt.lower()
+    try:
+        result = ctx.ticket_io_manager.export_tickets(
+            output_path=output_path,
+            fmt=fmt,
+            include_logs=with_logs,
+            include_events=with_events,
+        )
+        click.echo(result.formatted())
+    except TicketError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("ticket-import", help="从文件导入工单（CSV/JSON）")
+@click.argument("file_path", type=click.Path(exists=True, dir_okay=False))
+@click.option("--conflict-strategy",
+              type=click.Choice(["skip", "abort", "force"], case_sensitive=False),
+              default="skip",
+              help="ID 冲突处理策略：skip（跳过）/ abort（中止）/ force（覆盖），默认 skip")
+@click.option("-H", "--operator", default="import", help="操作人（用于日志）")
+@pass_ctx
+def cmd_ticket_import(ctx: CliContext, file_path: str, conflict_strategy: str,
+                      operator: str) -> None:
+    """导入工单"""
+    if conflict_strategy:
+        conflict_strategy = conflict_strategy.lower()
+    try:
+        result = ctx.ticket_io_manager.import_tickets(
+            file_path=file_path,
+            conflict_strategy=conflict_strategy,
+            operator=operator,
+        )
+        click.echo(result.formatted())
+
+        if result.items:
+            click.echo()
+            click.echo("详情:")
+            for item in result.items:
+                status_label = {
+                    "success": "成功",
+                    "skipped": "跳过",
+                    "conflict": "冲突",
+                    "error": "错误",
+                }.get(item["status"], item["status"])
+                click.echo(
+                    f"  [{status_label}] {item['ticket_id']}: {item['reason']}"
+                )
+
+        if result.has_errors:
+            sys.exit(1)
+    except TicketError as e:
+        click.echo(f"错误: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("ticket-priorities", help="列出所有可用的工单优先级")
+@pass_ctx
+def cmd_ticket_priorities(ctx: CliContext) -> None:
+    """列出可用优先级"""
+    click.echo(ctx.ticket_manager.list_priorities())
+
+
+@main.command("ticket-assignable", help="列出可分配的人员列表")
+@pass_ctx
+def cmd_ticket_assignable(ctx: CliContext) -> None:
+    """列出可分配人员"""
+    click.echo(ctx.ticket_manager.list_assignable_users())
 
 
 if __name__ == "__main__":

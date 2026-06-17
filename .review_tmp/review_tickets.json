@@ -1,0 +1,73 @@
+{
+  "version": "1.0",
+  "ticket_count": 1,
+  "export_time": "2026-06-17 11:13:45",
+  "tickets": [
+    {
+      "ticket_id": "TKT-AD71230FEC8A",
+      "title": "Reviewer batch ticket",
+      "description": "",
+      "priority": "high",
+      "status": "completed",
+      "assignee": "bob",
+      "creator": "reviewer",
+      "due_time": "2026-06-30 18:00:00",
+      "steps": "check sensor,replace part",
+      "note": "review success chain",
+      "created_at": "2026-06-17 11:10:21",
+      "updated_at": "2026-06-17 11:11:56",
+      "completed_at": "2026-06-17 11:11:56",
+      "version": 3,
+      "logs": [
+        {
+          "id": "TLOG-6CF8E08D5A",
+          "operation": "create",
+          "operator": "reviewer",
+          "old_status": "",
+          "new_status": "assigned",
+          "old_assignee": "",
+          "new_assignee": "alice",
+          "note": "创建工单，关联 2 个事件",
+          "operated_at": "2026-06-17 11:10:21"
+        },
+        {
+          "id": "TLOG-B04AB6E22F",
+          "operation": "assign",
+          "operator": "bob",
+          "old_status": "assigned",
+          "new_status": "assigned",
+          "old_assignee": "alice",
+          "new_assignee": "carol",
+          "note": "handoff",
+          "operated_at": "2026-06-17 11:11:13"
+        },
+        {
+          "id": "TLOG-D2C5323F23",
+          "operation": "claim",
+          "operator": "bob",
+          "old_status": "assigned",
+          "new_status": "in_progress",
+          "old_assignee": "alice",
+          "new_assignee": "bob",
+          "note": "claim by reviewer",
+          "operated_at": "2026-06-17 11:11:13"
+        },
+        {
+          "id": "TLOG-1C2BA55199",
+          "operation": "complete",
+          "operator": "bob",
+          "old_status": "in_progress",
+          "new_status": "completed",
+          "old_assignee": "bob",
+          "new_assignee": "bob",
+          "note": "fixed",
+          "operated_at": "2026-06-17 11:11:56"
+        }
+      ],
+      "event_ids": [
+        "EVT-0DB6F3DCE407",
+        "EVT-554BEFEFF6AF"
+      ]
+    }
+  ]
+}

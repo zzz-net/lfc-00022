@@ -310,6 +310,33 @@ class BatchOperationManager:
                 processed_at=now,
             ))
 
+        if batch_update.status == "closed" and old_status != "closed":
+            open_tickets = self.db.get_open_tickets_for_event(ev.id)
+            if open_tickets:
+                ticket_ids = ", ".join([t.id for t in open_tickets])
+                if conflict_strategy == CONFLICT_STRATEGY_SKIP:
+                    return _save_and_return(BatchOperationItem(
+                        id=item_id, batch_id=batch_id, event_id=ev.id,
+                        old_version=old_version, new_version=old_version,
+                        old_status=old_status, new_status=old_status,
+                        old_handler=old_handler, new_handler=old_handler,
+                        old_note=old_note, new_note=old_note,
+                        status=ITEM_STATUS_CONFLICT,
+                        reason=f"存在未完成工单，无法关闭: {ticket_ids}",
+                        processed_at=now,
+                    ))
+                elif conflict_strategy == CONFLICT_STRATEGY_ABORT:
+                    return _save_and_return(BatchOperationItem(
+                        id=item_id, batch_id=batch_id, event_id=ev.id,
+                        old_version=old_version, new_version=old_version,
+                        old_status=old_status, new_status=old_status,
+                        old_handler=old_handler, new_handler=old_handler,
+                        old_note=old_note, new_note=old_note,
+                        status=ITEM_STATUS_CONFLICT,
+                        reason=f"存在未完成工单，无法关闭: {ticket_ids}",
+                        processed_at=now,
+                    ))
+
         current_ev = self.db.get_event(ev.id)
         if current_ev is None:
             return _save_and_return(BatchOperationItem(

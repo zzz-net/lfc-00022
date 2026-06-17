@@ -1,0 +1,2 @@
+﻿ticket_id,title,description,priority,status,assignee,creator,due_time,steps,note,created_at,updated_at,completed_at,version
+TKT-AD71230FEC8A,Reviewer batch ticket,,high,completed,bob,reviewer,2026-06-30 18:00:00,"check sensor,replace part",review success chain,2026-06-17 11:10:21,2026-06-17 11:11:56,2026-06-17 11:11:56,3

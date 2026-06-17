@@ -1,0 +1,5 @@
+﻿ticket_id,title,description,priority,status,assignee,creator,due_time,steps,note,created_at,updated_at,completed_at,version
+TKT-299C6A2CC7B4,网络连接故障排查,排查网络连接问题,medium,completed,engineer2,ops,,,,2026-06-17 10:40:32,2026-06-17 10:42:18,2026-06-17 10:42:18,3
+TKT-45D4A20B2B29,温度异常处理,处理DEV-A001设备的温度告警,high,assigned,senior-engineer,admin,2026-06-20 18:00:00,"1. 检查散热系统
+2. 调整负载
+3. 验证恢复",,2026-06-17 10:08:58,2026-06-17 10:42:08,,2

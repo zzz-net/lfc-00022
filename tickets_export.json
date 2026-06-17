@@ -1,0 +1,103 @@
+{
+  "version": "1.0",
+  "ticket_count": 2,
+  "export_time": "2026-06-17 10:44:02",
+  "tickets": [
+    {
+      "ticket_id": "TKT-299C6A2CC7B4",
+      "title": "网络连接故障排查",
+      "description": "排查网络连接问题",
+      "priority": "medium",
+      "status": "completed",
+      "assignee": "engineer2",
+      "creator": "ops",
+      "due_time": "",
+      "steps": "",
+      "note": "",
+      "created_at": "2026-06-17 10:40:32",
+      "updated_at": "2026-06-17 10:42:18",
+      "completed_at": "2026-06-17 10:42:18",
+      "version": 3,
+      "logs": [
+        {
+          "id": "TLOG-FA443E78E3",
+          "operation": "create",
+          "operator": "ops",
+          "old_status": "",
+          "new_status": "open",
+          "old_assignee": "",
+          "new_assignee": "",
+          "note": "创建工单，关联 0 个事件",
+          "operated_at": "2026-06-17 10:40:32"
+        },
+        {
+          "id": "TLOG-A075A942BF",
+          "operation": "claim",
+          "operator": "engineer2",
+          "old_status": "open",
+          "new_status": "in_progress",
+          "old_assignee": "",
+          "new_assignee": "engineer2",
+          "note": "我来处理这个网络问题",
+          "operated_at": "2026-06-17 10:40:56"
+        },
+        {
+          "id": "TLOG-D7E7957028",
+          "operation": "complete",
+          "operator": "engineer2",
+          "old_status": "in_progress",
+          "new_status": "completed",
+          "old_assignee": "engineer2",
+          "new_assignee": "engineer2",
+          "note": "问题已修复，网络恢复正常",
+          "operated_at": "2026-06-17 10:42:18"
+        }
+      ],
+      "event_ids": []
+    },
+    {
+      "ticket_id": "TKT-45D4A20B2B29",
+      "title": "温度异常处理",
+      "description": "处理DEV-A001设备的温度告警",
+      "priority": "high",
+      "status": "assigned",
+      "assignee": "senior-engineer",
+      "creator": "admin",
+      "due_time": "2026-06-20 18:00:00",
+      "steps": "1. 检查散热系统\n2. 调整负载\n3. 验证恢复",
+      "note": "",
+      "created_at": "2026-06-17 10:08:58",
+      "updated_at": "2026-06-17 10:42:08",
+      "completed_at": "",
+      "version": 2,
+      "logs": [
+        {
+          "id": "TLOG-2C9BB918AC",
+          "operation": "create",
+          "operator": "admin",
+          "old_status": "",
+          "new_status": "assigned",
+          "old_assignee": "",
+          "new_assignee": "engineer1",
+          "note": "创建工单，关联 2 个事件",
+          "operated_at": "2026-06-17 10:08:58"
+        },
+        {
+          "id": "TLOG-941566E3BB",
+          "operation": "assign",
+          "operator": "admin",
+          "old_status": "assigned",
+          "new_status": "assigned",
+          "old_assignee": "engineer1",
+          "new_assignee": "senior-engineer",
+          "note": "升级处理",
+          "operated_at": "2026-06-17 10:42:08"
+        }
+      ],
+      "event_ids": [
+        "EVT-0DB6F3DCE407",
+        "EVT-554BEFEFF6AF"
+      ]
+    }
+  ]
+}

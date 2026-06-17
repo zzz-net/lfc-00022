@@ -62,12 +62,34 @@ class BatchConfig:
 
 
 @dataclass
+class TicketConfig:
+    """工单配置"""
+    valid_priorities: list[str] = field(default_factory=lambda: [
+        "low", "medium", "high", "critical"
+    ])
+    assignable_users: list[str] = field(default_factory=list)
+    default_priority: str = "medium"
+    allow_closed_event_ticket: bool = False
+    allow_duplicate_open_ticket: bool = False
+    log_retention_days: int = 90
+
+    def priority_labels(self) -> dict[str, str]:
+        return {
+            "low": "低",
+            "medium": "中",
+            "high": "高",
+            "critical": "紧急",
+        }
+
+
+@dataclass
 class AppConfig:
     """应用配置"""
     validation: ValidationRules = field(default_factory=ValidationRules)
     event_merge: EventMergeConfig = field(default_factory=EventMergeConfig)
     export: ExportConfig = field(default_factory=ExportConfig)
     batch: BatchConfig = field(default_factory=BatchConfig)
+    ticket: TicketConfig = field(default_factory=TicketConfig)
     db_path: str = "inspection.db"
 
     @classmethod
@@ -171,6 +193,46 @@ class AppConfig:
                 if not isinstance(bt["log_retention_days"], int) or bt["log_retention_days"] <= 0:
                     raise ConfigError("batch.log_retention_days 必须是正整数")
                 cfg.batch.log_retention_days = bt["log_retention_days"]
+
+        if "ticket" in raw:
+            tk = raw["ticket"]
+            if not isinstance(tk, dict):
+                raise ConfigError("ticket 必须是字典")
+            if "valid_priorities" in tk:
+                if not isinstance(tk["valid_priorities"], list):
+                    raise ConfigError("ticket.valid_priorities 必须是列表")
+                if not all(isinstance(p, str) for p in tk["valid_priorities"]):
+                    raise ConfigError("ticket.valid_priorities 列表元素必须是字符串")
+                if not tk["valid_priorities"]:
+                    raise ConfigError("ticket.valid_priorities 不能为空列表")
+                cfg.ticket.valid_priorities = tk["valid_priorities"]
+            if "assignable_users" in tk:
+                if not isinstance(tk["assignable_users"], list):
+                    raise ConfigError("ticket.assignable_users 必须是列表")
+                if not all(isinstance(u, str) for u in tk["assignable_users"]):
+                    raise ConfigError("ticket.assignable_users 列表元素必须是字符串")
+                cfg.ticket.assignable_users = tk["assignable_users"]
+            if "default_priority" in tk:
+                if not isinstance(tk["default_priority"], str):
+                    raise ConfigError("ticket.default_priority 必须是字符串")
+                if tk["default_priority"] not in cfg.ticket.valid_priorities:
+                    raise ConfigError(
+                        f"ticket.default_priority ({tk['default_priority']}) "
+                        f"不在 valid_priorities 列表中"
+                    )
+                cfg.ticket.default_priority = tk["default_priority"]
+            if "allow_closed_event_ticket" in tk:
+                if not isinstance(tk["allow_closed_event_ticket"], bool):
+                    raise ConfigError("ticket.allow_closed_event_ticket 必须是布尔值")
+                cfg.ticket.allow_closed_event_ticket = tk["allow_closed_event_ticket"]
+            if "allow_duplicate_open_ticket" in tk:
+                if not isinstance(tk["allow_duplicate_open_ticket"], bool):
+                    raise ConfigError("ticket.allow_duplicate_open_ticket 必须是布尔值")
+                cfg.ticket.allow_duplicate_open_ticket = tk["allow_duplicate_open_ticket"]
+            if "log_retention_days" in tk:
+                if not isinstance(tk["log_retention_days"], int) or tk["log_retention_days"] <= 0:
+                    raise ConfigError("ticket.log_retention_days 必须是正整数")
+                cfg.ticket.log_retention_days = tk["log_retention_days"]
 
         if "db_path" in raw:
             if not isinstance(raw["db_path"], str):

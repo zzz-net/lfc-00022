@@ -1081,3 +1081,458 @@ class Database:
                 (template_id,)
             )
             return cur.rowcount
+
+
+# ============ 工单模块常量 ============
+
+TICKET_STATUS_OPEN = "open"
+TICKET_STATUS_ASSIGNED = "assigned"
+TICKET_STATUS_IN_PROGRESS = "in_progress"
+TICKET_STATUS_COMPLETED = "completed"
+TICKET_STATUS_REVOKED = "revoked"
+
+VALID_TICKET_STATUSES = {
+    TICKET_STATUS_OPEN,
+    TICKET_STATUS_ASSIGNED,
+    TICKET_STATUS_IN_PROGRESS,
+    TICKET_STATUS_COMPLETED,
+    TICKET_STATUS_REVOKED,
+}
+
+TICKET_PRIORITY_LOW = "low"
+TICKET_PRIORITY_MEDIUM = "medium"
+TICKET_PRIORITY_HIGH = "high"
+TICKET_PRIORITY_CRITICAL = "critical"
+
+DEFAULT_TICKET_PRIORITIES = [
+    TICKET_PRIORITY_LOW,
+    TICKET_PRIORITY_MEDIUM,
+    TICKET_PRIORITY_HIGH,
+    TICKET_PRIORITY_CRITICAL,
+]
+
+TICKET_STATUS_LABELS = {
+    TICKET_STATUS_OPEN: "待处理",
+    TICKET_STATUS_ASSIGNED: "已分配",
+    TICKET_STATUS_IN_PROGRESS: "处理中",
+    TICKET_STATUS_COMPLETED: "已完成",
+    TICKET_STATUS_REVOKED: "已撤回",
+}
+
+TICKET_PRIORITY_LABELS = {
+    TICKET_PRIORITY_LOW: "低",
+    TICKET_PRIORITY_MEDIUM: "中",
+    TICKET_PRIORITY_HIGH: "高",
+    TICKET_PRIORITY_CRITICAL: "紧急",
+}
+
+TICKET_LOG_OP_CREATE = "create"
+TICKET_LOG_OP_ASSIGN = "assign"
+TICKET_LOG_OP_CLAIM = "claim"
+TICKET_LOG_OP_COMPLETE = "complete"
+TICKET_LOG_OP_REVOKE = "revoke"
+TICKET_LOG_OP_UPDATE = "update"
+TICKET_LOG_OP_IMPORT = "import"
+
+VALID_TICKET_LOG_OPS = {
+    TICKET_LOG_OP_CREATE,
+    TICKET_LOG_OP_ASSIGN,
+    TICKET_LOG_OP_CLAIM,
+    TICKET_LOG_OP_COMPLETE,
+    TICKET_LOG_OP_REVOKE,
+    TICKET_LOG_OP_UPDATE,
+    TICKET_LOG_OP_IMPORT,
+}
+
+TICKET_IMPORT_CONFLICT_SKIP = "skip"
+TICKET_IMPORT_CONFLICT_ABORT = "abort"
+TICKET_IMPORT_CONFLICT_FORCE = "force"
+VALID_TICKET_IMPORT_CONFLICT_STRATEGIES = {
+    TICKET_IMPORT_CONFLICT_SKIP,
+    TICKET_IMPORT_CONFLICT_ABORT,
+    TICKET_IMPORT_CONFLICT_FORCE,
+}
+
+
+@dataclass
+class Ticket:
+    """工单"""
+    id: str
+    title: str
+    description: str
+    priority: str
+    status: str
+    assignee: str
+    creator: str
+    due_time: str = ""
+    steps: str = ""
+    note: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+    completed_at: str = ""
+    version: int = 1
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ticket_id": self.id,
+            "title": self.title,
+            "description": self.description,
+            "priority": self.priority,
+            "status": self.status,
+            "assignee": self.assignee,
+            "creator": self.creator,
+            "due_time": self.due_time,
+            "steps": self.steps,
+            "note": self.note,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "completed_at": self.completed_at,
+            "version": self.version,
+        }
+
+
+@dataclass
+class TicketLog:
+    """工单流转日志"""
+    id: str
+    ticket_id: str
+    operation: str
+    operator: str
+    old_status: str
+    new_status: str
+    old_assignee: str
+    new_assignee: str
+    note: str
+    operated_at: str
+
+
+@dataclass
+class TicketEvent:
+    """工单-事件关联"""
+    ticket_id: str
+    event_id: str
+
+
+def _init_ticket_tables(conn: sqlite3.Connection) -> None:
+    """初始化工单相关表（独立函数，便于数据库初始化时调用）"""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS tickets (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            priority TEXT NOT NULL DEFAULT 'medium',
+            status TEXT NOT NULL DEFAULT 'open',
+            assignee TEXT DEFAULT '',
+            creator TEXT NOT NULL,
+            due_time TEXT DEFAULT '',
+            steps TEXT DEFAULT '',
+            note TEXT DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            completed_at TEXT DEFAULT '',
+            version INTEGER DEFAULT 1
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_tickets_status
+            ON tickets(status);
+        CREATE INDEX IF NOT EXISTS idx_tickets_priority
+            ON tickets(priority);
+        CREATE INDEX IF NOT EXISTS idx_tickets_assignee
+            ON tickets(assignee);
+        CREATE INDEX IF NOT EXISTS idx_tickets_created
+            ON tickets(created_at);
+        CREATE INDEX IF NOT EXISTS idx_tickets_due
+            ON tickets(due_time);
+
+        CREATE TABLE IF NOT EXISTS ticket_logs (
+            id TEXT PRIMARY KEY,
+            ticket_id TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            operator TEXT NOT NULL,
+            old_status TEXT NOT NULL,
+            new_status TEXT NOT NULL,
+            old_assignee TEXT NOT NULL,
+            new_assignee TEXT NOT NULL,
+            note TEXT DEFAULT '',
+            operated_at TEXT NOT NULL,
+            FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_ticket_logs_ticket
+            ON ticket_logs(ticket_id);
+        CREATE INDEX IF NOT EXISTS idx_ticket_logs_time
+            ON ticket_logs(operated_at);
+
+        CREATE TABLE IF NOT EXISTS ticket_events (
+            ticket_id TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            PRIMARY KEY (ticket_id, event_id),
+            FOREIGN KEY (ticket_id) REFERENCES tickets(id) ON DELETE CASCADE,
+            FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_ticket_events_event
+            ON ticket_events(event_id);
+    """)
+
+
+def _ensure_ticket_tables(db: "Database") -> None:
+    """确保工单表存在（用于向后兼容，旧数据库可能没有工单表）"""
+    with db._conn() as conn:
+        _init_ticket_tables(conn)
+
+
+def _generate_ticket_id() -> str:
+    """生成工单ID"""
+    return "TKT-" + uuid.uuid4().hex[:12].upper()
+
+
+def _add_ticket_tables_to_init(db_class):
+    """将工单表初始化添加到 Database._init_db 中"""
+    original_init = db_class._init_db
+
+    def new_init_db(self):
+        original_init(self)
+        with self._conn() as conn:
+            _init_ticket_tables(conn)
+
+    db_class._init_db = new_init_db
+    return db_class
+
+
+Database = _add_ticket_tables_to_init(Database)
+
+
+def _add_ticket_methods(db_class):
+    """将工单相关方法添加到 Database 类中"""
+
+    def insert_ticket(self, ticket: Ticket, event_ids: list[str] | None = None) -> None:
+        """插入工单"""
+        event_ids = event_ids or []
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO tickets
+                   (id, title, description, priority, status, assignee,
+                    creator, due_time, steps, note, created_at, updated_at,
+                    completed_at, version)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (ticket.id, ticket.title, ticket.description, ticket.priority,
+                 ticket.status, ticket.assignee, ticket.creator, ticket.due_time,
+                 ticket.steps, ticket.note, ticket.created_at, ticket.updated_at,
+                 ticket.completed_at, ticket.version)
+            )
+            for eid in event_ids:
+                conn.execute(
+                    "INSERT OR IGNORE INTO ticket_events (ticket_id, event_id) VALUES (?, ?)",
+                    (ticket.id, eid)
+                )
+
+    def get_ticket(self, ticket_id: str) -> Optional[Ticket]:
+        """按ID获取工单"""
+        _ensure_ticket_tables(self)
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM tickets WHERE id = ?", (ticket_id,)
+            ).fetchone()
+            if not row:
+                return None
+            return Ticket(**dict(row))
+
+    def ticket_exists(self, ticket_id: str) -> bool:
+        """检查工单是否存在"""
+        _ensure_ticket_tables(self)
+        with self._conn() as conn:
+            cur = conn.execute(
+                "SELECT COUNT(*) FROM tickets WHERE id = ?", (ticket_id,)
+            )
+            return cur.fetchone()[0] > 0
+
+    def update_ticket(self, ticket: Ticket) -> None:
+        """更新工单"""
+        with self._conn() as conn:
+            conn.execute(
+                """UPDATE tickets SET
+                   title=?, description=?, priority=?, status=?, assignee=?,
+                   due_time=?, steps=?, note=?, updated_at=?, completed_at=?, version=?
+                   WHERE id=?""",
+                (ticket.title, ticket.description, ticket.priority, ticket.status,
+                 ticket.assignee, ticket.due_time, ticket.steps, ticket.note,
+                 ticket.updated_at, ticket.completed_at, ticket.version, ticket.id)
+            )
+
+    def update_ticket_with_version(self, ticket: Ticket, expected_version: int) -> bool:
+        """带版本检查的更新，返回 True 表示成功"""
+        ticket.version = expected_version + 1
+        with self._conn() as conn:
+            cur = conn.execute(
+                """UPDATE tickets SET
+                   title=?, description=?, priority=?, status=?, assignee=?,
+                   due_time=?, steps=?, note=?, updated_at=?, completed_at=?, version=?
+                   WHERE id=? AND version=?""",
+                (ticket.title, ticket.description, ticket.priority, ticket.status,
+                 ticket.assignee, ticket.due_time, ticket.steps, ticket.note,
+                 ticket.updated_at, ticket.completed_at, ticket.version,
+                 ticket.id, expected_version)
+            )
+            return cur.rowcount > 0
+
+    def delete_ticket(self, ticket_id: str) -> None:
+        """删除工单"""
+        with self._conn() as conn:
+            conn.execute("DELETE FROM tickets WHERE id = ?", (ticket_id,))
+
+    def get_all_tickets(self) -> list[Ticket]:
+        """获取所有工单"""
+        _ensure_ticket_tables(self)
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM tickets ORDER BY created_at DESC"
+            ).fetchall()
+            return [Ticket(**dict(r)) for r in rows]
+
+    def filter_tickets(self,
+                       statuses: list[str] | None = None,
+                       priorities: list[str] | None = None,
+                       assignees: list[str] | None = None,
+                       creators: list[str] | None = None) -> list[Ticket]:
+        """按条件筛选工单"""
+        _ensure_ticket_tables(self)
+        conditions: list[str] = []
+        params: list[Any] = []
+
+        if statuses:
+            placeholders = ",".join(["?"] * len(statuses))
+            conditions.append(f"status IN ({placeholders})")
+            params.extend(statuses)
+
+        if priorities:
+            placeholders = ",".join(["?"] * len(priorities))
+            conditions.append(f"priority IN ({placeholders})")
+            params.extend(priorities)
+
+        if assignees:
+            placeholders = ",".join(["?"] * len(assignees))
+            conditions.append(f"assignee IN ({placeholders})")
+            params.extend(assignees)
+
+        if creators:
+            placeholders = ",".join(["?"] * len(creators))
+            conditions.append(f"creator IN ({placeholders})")
+            params.extend(creators)
+
+        where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
+
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM tickets {where_clause} ORDER BY created_at DESC",
+                params
+            ).fetchall()
+            return [Ticket(**dict(r)) for r in rows]
+
+    def add_ticket_event(self, ticket_id: str, event_id: str) -> None:
+        """添加工单-事件关联"""
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO ticket_events (ticket_id, event_id) VALUES (?, ?)",
+                (ticket_id, event_id)
+            )
+
+    def add_ticket_events(self, ticket_id: str, event_ids: list[str]) -> None:
+        """批量添加工单-事件关联"""
+        with self._conn() as conn:
+            for eid in event_ids:
+                conn.execute(
+                    "INSERT OR IGNORE INTO ticket_events (ticket_id, event_id) VALUES (?, ?)",
+                    (ticket_id, eid)
+                )
+
+    def get_ticket_event_ids(self, ticket_id: str) -> list[str]:
+        """获取工单关联的事件ID列表"""
+        _ensure_ticket_tables(self)
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT event_id FROM ticket_events WHERE ticket_id = ? ORDER BY event_id",
+                (ticket_id,)
+            ).fetchall()
+            return [r[0] for r in rows]
+
+    def get_event_ticket_ids(self, event_id: str) -> list[str]:
+        """获取事件关联的工单ID列表"""
+        _ensure_ticket_tables(self)
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT ticket_id FROM ticket_events WHERE event_id = ? ORDER BY ticket_id",
+                (event_id,)
+            ).fetchall()
+            return [r[0] for r in rows]
+
+    def get_open_tickets_for_event(self, event_id: str) -> list[Ticket]:
+        """获取事件关联的未完成工单"""
+        _ensure_ticket_tables(self)
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT t.* FROM tickets t
+                   JOIN ticket_events te ON t.id = te.ticket_id
+                   WHERE te.event_id = ?
+                     AND t.status NOT IN ('completed', 'revoked')
+                   ORDER BY t.created_at DESC""",
+                (event_id,)
+            ).fetchall()
+            return [Ticket(**dict(r)) for r in rows]
+
+    def add_ticket_log(self, ticket_id: str, operation: str, operator: str,
+                       old_status: str, new_status: str,
+                       old_assignee: str, new_assignee: str,
+                       note: str = "") -> str:
+        """添加工单流转日志"""
+        log_id = "TLOG-" + uuid.uuid4().hex[:10].upper()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO ticket_logs
+                   (id, ticket_id, operation, operator, old_status, new_status,
+                    old_assignee, new_assignee, note, operated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (log_id, ticket_id, operation, operator, old_status, new_status,
+                 old_assignee, new_assignee, note, now)
+            )
+        return log_id
+
+    def get_ticket_logs(self, ticket_id: str) -> list[TicketLog]:
+        """获取工单的所有流转日志"""
+        _ensure_ticket_tables(self)
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM ticket_logs WHERE ticket_id = ? ORDER BY operated_at ASC",
+                (ticket_id,)
+            ).fetchall()
+            return [TicketLog(**dict(r)) for r in rows]
+
+    def get_ticket_count(self) -> int:
+        """获取工单总数"""
+        _ensure_ticket_tables(self)
+        with self._conn() as conn:
+            cur = conn.execute("SELECT COUNT(*) FROM tickets")
+            return cur.fetchone()[0]
+
+    db_class.insert_ticket = insert_ticket
+    db_class.get_ticket = get_ticket
+    db_class.ticket_exists = ticket_exists
+    db_class.update_ticket = update_ticket
+    db_class.update_ticket_with_version = update_ticket_with_version
+    db_class.delete_ticket = delete_ticket
+    db_class.get_all_tickets = get_all_tickets
+    db_class.filter_tickets = filter_tickets
+    db_class.add_ticket_event = add_ticket_event
+    db_class.add_ticket_events = add_ticket_events
+    db_class.get_ticket_event_ids = get_ticket_event_ids
+    db_class.get_event_ticket_ids = get_event_ticket_ids
+    db_class.get_open_tickets_for_event = get_open_tickets_for_event
+    db_class.add_ticket_log = add_ticket_log
+    db_class.get_ticket_logs = get_ticket_logs
+    db_class.get_ticket_count = get_ticket_count
+
+    return db_class
+
+
+Database = _add_ticket_methods(Database)
